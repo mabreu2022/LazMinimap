@@ -9,4 +9,4 @@ backup/
 *.bak
 *.lps
 *~
-
+packagefiles.xml
