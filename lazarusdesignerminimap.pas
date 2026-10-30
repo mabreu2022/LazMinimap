@@ -16,16 +16,16 @@ const
 
 type
 
-  { TMiniMapCorner: Cantos de ancoragem no editor de formulários e modo destacado }
+  { TMiniMapCorner: Cantos de ancoragem no editor de formulários e modo livre }
   TMiniMapCorner = (
-    mmcBottomLeft,   // Canto Inferior Esquerdo (Padrão)
+    mmcBottomLeft,   // Canto Inferior Esquerdo (Padrão Delphi)
     mmcBottomRight,  // Canto Inferior Direito
     mmcTopLeft,      // Canto Superior Esquerdo
     mmcTopRight,     // Canto Superior Direito
-    mmcFloating      // Destacado livremente pelo usuário
+    mmcFloating      // Mover livremente
   );
 
-  { TFormDesignerMiniMapControl: Renderiza a tela de 1080p, o Form e gerencia docking/arraste }
+  { TFormDesignerMiniMapControl: Controle nativo de miniatura do formulário no Form Designer }
   TFormDesignerMiniMapControl = class(TCustomControl)
   private
     FTargetForm: TCustomForm;
@@ -42,16 +42,15 @@ type
     FScreenColor: TColor;
     FSelectionColor: TColor;
 
-    // Gestão de destaque (arraste livre) e ancoragem
+    // Gestão de cantos, recolhimento e arraste livre
     FCorner: TMiniMapCorner;
     FCollapsed: Boolean;
     FNormalHeight: Integer;
-    FDraggingWin: Boolean;
+    FDragging: Boolean;
     FDragMouseStart: TPoint;
-    FDragWinStart: TPoint;
-    FFloatingOffset: TPoint;
+    FDragCtrlStart: TPoint;
 
-    // Menu de contexto e botões de cabeçalho
+    // Menu de contexto
     FPopupMenu: TPopupMenu;
     procedure SetTargetForm(AValue: TCustomForm);
     procedure SetSelectedComponent(AValue: TComponent);
@@ -74,28 +73,18 @@ type
   public
     constructor Create(AOwner: TComponent); override;
     destructor Destroy; override;
+    procedure UpdateDockPosition;
     property TargetForm: TCustomForm read FTargetForm write SetTargetForm;
     property SelectedComponent: TComponent read FSelectedComponent write SetSelectedComponent;
     property Corner: TMiniMapCorner read FCorner write SetCorner;
     property Collapsed: Boolean read FCollapsed write SetCollapsed;
-    property FloatingOffset: TPoint read FFloatingOffset write FFloatingOffset;
   end;
 
-  { TMiniMapFloatingWindow: Janela flutuante sem borda otimizada para o Form Designer }
-  TMiniMapFloatingWindow = class(TCustomForm)
-  protected
-    procedure CreateParams(var Params: TCreateParams); override;
-  public
-    constructor CreateNew(AOwner: TComponent; Num: Integer = 0); override;
-  end;
-
-  { TFormDesignerMiniMapManager: Gerencia posicionamento, cantos e visibilidade no Form Designer }
+  { TFormDesignerMiniMapManager: Gerencia posicionamento e visibilidade sem criar janelas popup }
   TFormDesignerMiniMapManager = class(TComponent)
   private
-    FWin: TMiniMapFloatingWindow;
     FMiniMap: TFormDesignerMiniMapControl;
     FTimer: TTimer;
-    FLastBounds: TRect;
     FLastSignature: Int64;
     FUpdating: Boolean;
     function ComputeSignature(AForm: TCustomForm): Int64;
@@ -104,7 +93,6 @@ type
     procedure OnTimer(Sender: TObject);
     procedure OnChangeLookupRoot;
     procedure OnSetSelection(const ASelection: TPersistentSelectionList);
-    procedure OnModified(Sender: TObject);
     procedure UpdatePositionAndState;
   public
     constructor Create(AOwner: TComponent); override;
@@ -133,7 +121,6 @@ begin
   // Canto padrão inicial: Inferior Esquerdo (como no Delphi)
   FCorner := mmcBottomLeft;
   FCollapsed := False;
-  FFloatingOffset := Point(20, 20);
 
   // Cores do tema escuro moderno
   FBackColor := TColor($1E1E1E);
@@ -190,7 +177,7 @@ begin
   FPopupMenu.Items.Add(Item);
 
   Item := TMenuItem.Create(FPopupMenu);
-  Item.Caption := 'Destacado (Mover Livremente)';
+  Item.Caption := 'Mover Livremente (Destacar)';
   Item.Tag := Ord(mmcFloating);
   Item.OnClick := @OnMenuCornerClick;
   FPopupMenu.Items.Add(Item);
@@ -237,33 +224,77 @@ begin
   if FCorner <> AValue then
   begin
     FCorner := AValue;
+    UpdateDockPosition;
     Invalidate;
   end;
 end;
 
 procedure TFormDesignerMiniMapControl.SetCollapsed(AValue: Boolean);
-var
-  ParentForm: TCustomForm;
 begin
   if FCollapsed <> AValue then
   begin
     FCollapsed := AValue;
-    ParentForm := GetParentForm(Self);
-    if ParentForm <> nil then
-    begin
-      if FCollapsed then
-      begin
-        Height := FHeaderHeight + 2;
-        ParentForm.Height := FHeaderHeight + 2;
-      end
-      else
-      begin
-        Height := FNormalHeight;
-        ParentForm.Height := FNormalHeight;
-      end;
-    end;
+    if FCollapsed then
+      Height := FHeaderHeight + 2
+    else
+      Height := FNormalHeight;
+    UpdateDockPosition;
     Invalidate;
   end;
+end;
+
+procedure TFormDesignerMiniMapControl.UpdateDockPosition;
+var
+  ParentW, ParentH: Integer;
+  P: TWinControl;
+  Margin: Integer;
+  NewL, NewT: Integer;
+begin
+  P := Parent;
+  if P = nil then Exit;
+  ParentW := P.ClientWidth;
+  ParentH := P.ClientHeight;
+  Margin := 6;
+
+  case FCorner of
+    mmcBottomLeft:
+    begin
+      NewL := Margin;
+      NewT := ParentH - Height - Margin;
+      Anchors := [akLeft, akBottom];
+    end;
+
+    mmcBottomRight:
+    begin
+      NewL := ParentW - Width - Margin;
+      NewT := ParentH - Height - Margin;
+      Anchors := [akRight, akBottom];
+    end;
+
+    mmcTopLeft:
+    begin
+      NewL := Margin;
+      NewT := Margin;
+      Anchors := [akLeft, akTop];
+    end;
+
+    mmcTopRight:
+    begin
+      NewL := ParentW - Width - Margin;
+      NewT := Margin;
+      Anchors := [akRight, akTop];
+    end;
+
+    mmcFloating:
+    begin
+      Anchors := [];
+      Exit;
+    end;
+  end;
+
+  if (Left <> NewL) or (Top <> NewT) then
+    SetBounds(NewL, NewT, Width, Height);
+  BringToFront;
 end;
 
 function TFormDesignerMiniMapControl.GetControlBoundsInForm(ACtrl: TControl): TRect;
@@ -626,7 +657,6 @@ end;
 procedure TFormDesignerMiniMapControl.MouseDown(Button: TMouseButton; Shift: TShiftState; X, Y: Integer);
 var
   TargetComp: TComponent;
-  ParentWin: TCustomForm;
 begin
   inherited MouseDown(Button, Shift, X, Y);
 
@@ -653,17 +683,13 @@ begin
       Exit;
     end;
 
-    // Inicia o arraste da janela (para destacar e mover livremente)
+    // Inicia o arraste livre do controle
     if Button = mbLeft then
     begin
-      ParentWin := GetParentForm(Self);
-      if ParentWin <> nil then
-      begin
-        FDraggingWin := True;
-        MouseCapture := True;
-        FDragMouseStart := ClientToScreen(Point(X, Y));
-        FDragWinStart := Point(ParentWin.Left, ParentWin.Top);
-      end;
+      FDragging := True;
+      MouseCapture := True;
+      FDragMouseStart := ClientToScreen(Point(X, Y));
+      FDragCtrlStart := Point(Left, Top);
       Exit;
     end;
   end;
@@ -684,24 +710,26 @@ end;
 procedure TFormDesignerMiniMapControl.MouseMove(Shift: TShiftState; X, Y: Integer);
 var
   CurScreen: TPoint;
-  ParentWin: TCustomForm;
   NewLeft, NewTop: Integer;
   HoverComp: TComponent;
 begin
   inherited MouseMove(Shift, X, Y);
 
-  // Se estiver arrastando a janela pela barra de título (modo destacável)
-  if FDraggingWin then
+  // Se estiver arrastando o controle pela barra de título
+  if FDragging then
   begin
-    ParentWin := GetParentForm(Self);
-    if ParentWin <> nil then
+    CurScreen := ClientToScreen(Point(X, Y));
+    NewLeft := FDragCtrlStart.X + (CurScreen.X - FDragMouseStart.X);
+    NewTop := FDragCtrlStart.Y + (CurScreen.Y - FDragMouseStart.Y);
+    if Parent <> nil then
     begin
-      CurScreen := ClientToScreen(Point(X, Y));
-      NewLeft := FDragWinStart.X + (CurScreen.X - FDragMouseStart.X);
-      NewTop := FDragWinStart.Y + (CurScreen.Y - FDragMouseStart.Y);
-      ParentWin.SetBounds(NewLeft, NewTop, ParentWin.Width, ParentWin.Height);
-      FCorner := mmcFloating; // Torna-se destacado e flutuante
+      NewLeft := Max(0, Min(Parent.ClientWidth - Width, NewLeft));
+      NewTop := Max(0, Min(Parent.ClientHeight - Height, NewTop));
     end;
+    FCorner := mmcFloating;
+    Anchors := [];
+    SetBounds(NewLeft, NewTop, Width, Height);
+    BringToFront;
     Exit;
   end;
 
@@ -723,9 +751,9 @@ end;
 procedure TFormDesignerMiniMapControl.MouseUp(Button: TMouseButton; Shift: TShiftState; X, Y: Integer);
 begin
   inherited MouseUp(Button, Shift, X, Y);
-  if FDraggingWin then
+  if FDragging then
   begin
-    FDraggingWin := False;
+    FDragging := False;
     MouseCapture := False;
   end;
 end;
@@ -740,53 +768,25 @@ begin
   end;
 end;
 
-{ TMiniMapFloatingWindow }
-
-constructor TMiniMapFloatingWindow.CreateNew(AOwner: TComponent; Num: Integer);
-begin
-  inherited CreateNew(AOwner, Num);
-  Caption := '';
-  BorderStyle := bsNone;
-  ShowInTaskBar := stNever;
-  KeyPreview := False;
-  Width := 204;
-  Height := 136;
-end;
-
-procedure TMiniMapFloatingWindow.CreateParams(var Params: TCreateParams);
-begin
-  inherited CreateParams(Params);
-  Params.Style := Params.Style or WS_POPUP;
-  {$IFDEF WINDOWS}
-  Params.ExStyle := Params.ExStyle or WS_EX_TOOLWINDOW;
-  Params.ExStyle := Params.ExStyle or DWORD($08000000); // WS_EX_NOACTIVATE: não rouba o foco do editor
-  {$ENDIF}
-end;
-
 { TFormDesignerMiniMapManager }
 
 constructor TFormDesignerMiniMapManager.Create(AOwner: TComponent);
 begin
   inherited Create(AOwner);
 
-  FWin := TMiniMapFloatingWindow.CreateNew(nil);
+  FMiniMap := TFormDesignerMiniMapControl.Create(Self);
+  FMiniMap.Visible := False;
 
-  FMiniMap := TFormDesignerMiniMapControl.Create(FWin);
-  FMiniMap.Parent := FWin;
-  FMiniMap.Align := alClient;
-
-  FLastBounds := Rect(0, 0, 0, 0);
   FLastSignature := -1;
 
   if GlobalDesignHook <> nil then
   begin
     GlobalDesignHook.AddHandlerChangeLookupRoot(@OnChangeLookupRoot);
     GlobalDesignHook.AddHandlerSetSelection(@OnSetSelection);
-    GlobalDesignHook.AddHandlerModified(@OnModified);
   end;
 
   FTimer := TTimer.Create(Self);
-  FTimer.Interval := 35;
+  FTimer.Interval := 50; // 20 FPS para verificação de mudanças
   FTimer.OnTimer := @OnTimer;
   FTimer.Enabled := True;
 end;
@@ -799,11 +799,9 @@ begin
   begin
     GlobalDesignHook.RemoveHandlerChangeLookupRoot(@OnChangeLookupRoot);
     GlobalDesignHook.RemoveHandlerSetSelection(@OnSetSelection);
-    GlobalDesignHook.RemoveHandlerModified(@OnModified);
   end;
 
   FMiniMap.Free;
-  FWin.Free;
 
   inherited Destroy;
 end;
@@ -813,6 +811,7 @@ var
   ParentCtrl: TControl;
   TabSh: TTabSheet;
   Pgc: TPageControl;
+  LoopGuard: Integer;
 begin
   Result := False;
   ADesignArea := nil;
@@ -826,8 +825,10 @@ begin
   ADesignArea := AForm;
 
   ParentCtrl := AForm.Parent;
-  while ParentCtrl <> nil do
+  LoopGuard := 0;
+  while (ParentCtrl <> nil) and (LoopGuard < 30) do
   begin
+    Inc(LoopGuard);
     if not ParentCtrl.Visible then
       Exit(False);
 
@@ -836,40 +837,48 @@ begin
       TabSh := TTabSheet(ParentCtrl);
       Pgc := TabSh.PageControl;
       if (Pgc <> nil) and (Pgc.ActivePage <> TabSh) then
-        Exit(False); // Usuário está no editor de código!
+        Exit(False); // Usuário está na aba de Código!
 
       ADesignArea := TabSh;
-    end
-    else if (ADesignArea = AForm) and (ParentCtrl is TWinControl) then
-    begin
-      ADesignArea := TWinControl(ParentCtrl);
+      Break; // A área pai ideal para o MiniMap é a TabSheet do designer!
     end;
 
     ParentCtrl := ParentCtrl.Parent;
   end;
 
-  Result := True;
+  Result := (ADesignArea <> nil);
 end;
 
 function TFormDesignerMiniMapManager.FindActiveDesignedForm(out ADesignArea: TWinControl): TCustomForm;
 var
   I: Integer;
   F: TCustomForm;
+  Root: TPersistent;
 begin
   Result := nil;
   ADesignArea := nil;
 
-  if (GlobalDesignHook <> nil) and (GlobalDesignHook.LookupRoot is TCustomForm) then
+  if GlobalDesignHook <> nil then
   begin
-    F := TCustomForm(GlobalDesignHook.LookupRoot);
-    if (csDesigning in F.ComponentState) and IsFormDesignerActiveAndVisible(F, ADesignArea) then
-      Exit(F);
+    Root := GlobalDesignHook.LookupRoot;
+    if Root is TCustomForm then
+    begin
+      F := TCustomForm(Root);
+      if (csDesigning in F.ComponentState) and IsFormDesignerActiveAndVisible(F, ADesignArea) then
+        Exit(F);
+    end
+    else if (Root is TControl) and (TControl(Root).Parent <> nil) then
+    begin
+      F := GetParentForm(TControl(Root));
+      if (F <> nil) and (csDesigning in F.ComponentState) and IsFormDesignerActiveAndVisible(F, ADesignArea) then
+        Exit(F);
+    end;
   end;
 
   for I := 0 to Screen.CustomFormCount - 1 do
   begin
     F := Screen.CustomForms[I];
-    if (F <> nil) and (F <> FWin) and (csDesigning in F.ComponentState) then
+    if (F <> nil) and (csDesigning in F.ComponentState) then
     begin
       if IsFormDesignerActiveAndVisible(F, ADesignArea) then
         Exit(F);
@@ -905,11 +914,6 @@ begin
   FMiniMap.Invalidate;
 end;
 
-procedure TFormDesignerMiniMapManager.OnModified(Sender: TObject);
-begin
-  FMiniMap.Invalidate;
-end;
-
 procedure TFormDesignerMiniMapManager.OnTimer(Sender: TObject);
 begin
   UpdatePositionAndState;
@@ -919,105 +923,45 @@ procedure TFormDesignerMiniMapManager.UpdatePositionAndState;
 var
   DesignedForm: TCustomForm;
   DesignArea: TWinControl;
-  ParentFm: TCustomForm;
-  TargetBounds: TRect;
   Sig: Int64;
-  Margin: Integer;
-  P_TL, P_BR: TPoint;
 begin
   if FUpdating then Exit;
   FUpdating := True;
   try
     DesignedForm := FindActiveDesignedForm(DesignArea);
 
-    // Se não estiver no Form Designer ou se o formulário não estiver visível: ESCONDE!
+    // Se não estiver no Form Designer ou o formulário não estiver ativo/visível: oculta
     if (DesignedForm = nil) or (DesignArea = nil) or not DesignArea.HandleAllocated or not DesignArea.Visible then
     begin
-      if FWin.Visible then FWin.Hide;
+      if FMiniMap.Visible then
+        FMiniMap.Visible := False;
       Exit;
     end;
 
-    ParentFm := GetParentForm(DesignArea);
-    if (ParentFm <> nil) and ((ParentFm.WindowState = wsMinimized) or not ParentFm.Visible) then
+    // Se mudou de aba/área pai ou primeira vez, acopla nativamente como filho direto da TabSheet
+    if FMiniMap.Parent <> DesignArea then
     begin
-      if FWin.Visible then FWin.Hide;
-      Exit;
+      FMiniMap.Parent := DesignArea;
+      FMiniMap.BringToFront;
+      FMiniMap.UpdateDockPosition;
     end;
 
     if FMiniMap.TargetForm <> DesignedForm then
       FMiniMap.TargetForm := DesignedForm;
 
-    // Atualiza assinatura e redesenho imediatamente
+    if not FMiniMap.Visible then
+    begin
+      FMiniMap.Visible := True;
+      FMiniMap.BringToFront;
+    end;
+
+    // Redesenha apenas quando as propriedades do Form mudarem
     Sig := ComputeSignature(DesignedForm);
     if Sig <> FLastSignature then
     begin
       FLastSignature := Sig;
       FMiniMap.Invalidate;
     end;
-
-    // Se o usuário estiver no meio do arraste/redimensionamento ativo do mouse, não altera bounds da janela
-    {$IFDEF WINDOWS}
-    if (GetKeyState(VK_LBUTTON) < 0) and (FMiniMap.Corner <> mmcFloating) then
-      Exit;
-    {$ENDIF}
-
-    Margin := 4; // Rente ao canto para melhor aproveitamento de espaço
-    P_TL := DesignArea.ClientToScreen(Point(0, 0));
-    P_BR := DesignArea.ClientToScreen(Point(DesignArea.ClientWidth, DesignArea.ClientHeight));
-
-    // Posicionamento dinâmico baseado no canto configurado (ou destacado)
-    case FMiniMap.Corner of
-      mmcBottomLeft:
-      begin
-        TargetBounds.Left := P_TL.X + Margin;
-        TargetBounds.Bottom := P_BR.Y - Margin;
-        TargetBounds.Right := TargetBounds.Left + FWin.Width;
-        TargetBounds.Top := TargetBounds.Bottom - FWin.Height;
-      end;
-
-      mmcBottomRight:
-      begin
-        TargetBounds.Right := P_BR.X - Margin;
-        TargetBounds.Bottom := P_BR.Y - Margin;
-        TargetBounds.Left := TargetBounds.Right - FWin.Width;
-        TargetBounds.Top := TargetBounds.Bottom - FWin.Height;
-      end;
-
-      mmcTopLeft:
-      begin
-        TargetBounds.Left := P_TL.X + Margin;
-        TargetBounds.Top := P_TL.Y + Margin;
-        TargetBounds.Right := TargetBounds.Left + FWin.Width;
-        TargetBounds.Bottom := TargetBounds.Top + FWin.Height;
-      end;
-
-      mmcTopRight:
-      begin
-        TargetBounds.Right := P_BR.X - Margin;
-        TargetBounds.Top := P_TL.Y + Margin;
-        TargetBounds.Left := TargetBounds.Right - FWin.Width;
-        TargetBounds.Bottom := TargetBounds.Top + FWin.Height;
-      end;
-
-      mmcFloating:
-      begin
-        // Modo destacado: o usuário moveu a janela livremente
-        TargetBounds := Rect(FWin.Left, FWin.Top, FWin.Left + FWin.Width, FWin.Top + FWin.Height);
-      end;
-    end;
-
-    if FMiniMap.Corner <> mmcFloating then
-    begin
-      if (FLastBounds.Left <> TargetBounds.Left) or (FLastBounds.Top <> TargetBounds.Top) or
-         (FLastBounds.Right <> TargetBounds.Right) or (FLastBounds.Bottom <> TargetBounds.Bottom) then
-      begin
-        FLastBounds := TargetBounds;
-        FWin.SetBounds(TargetBounds.Left, TargetBounds.Top, FWin.Width, FWin.Height);
-      end;
-    end;
-
-    if not FWin.Visible then
-      FWin.Show;
   finally
     FUpdating := False;
   end;
