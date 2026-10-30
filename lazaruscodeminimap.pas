@@ -10,17 +10,32 @@ uses
   LCLType, LCLIntf, SynEdit, SynEditTypes, SrcEditorIntf, IDEIntf;
 
 const
-  LINE_PITCH   = 2; // 2 pixels verticais por linha de código
-  CHAR_WIDTH   = 2; // 2 pixels horizontais por caractere
   LEFT_MARGIN  = 6;
   RIGHT_MARGIN = 6;
 
 type
 
-  { TCodeEditorMiniMapControl: Renderiza a miniatura do código e barra de viewport }
+  { TCodeMiniMapZoom: Níveis de zoom e escala do minimapa }
+  TCodeMiniMapZoom = (
+    zmFit,    // Ajustar todo o arquivo à altura da tela (Visão Geral Completa / Sem Zoom)
+    zm1x,     // 1x Ultra Compacto (1px por linha)
+    zm2x,     // 2x Normal (2px por linha - Padrão)
+    zm3x,     // 3x Ampliado (3px por linha)
+    zm4x      // 4x Detalhado (4px por linha)
+  );
+
+  { TCodeMiniMapRenderMode: Estilo de renderização do código }
+  TCodeMiniMapRenderMode = (
+    rmSyntaxBlocks, // Barras de sintaxe (rápido, limpo e moderno)
+    rmMicroText     // Micro-texto legível (mini font)
+  );
+
+  { TCodeEditorMiniMapControl: Renderiza a miniatura do código com controle de zoom e viewport }
   TCodeEditorMiniMapControl = class(TCustomControl)
   private
     FSynEdit: TCustomSynEdit;
+    FZoom: TCodeMiniMapZoom;
+    FRenderMode: TCodeMiniMapRenderMode;
     FBackColor: TColor;
     FBorderColor: TColor;
     FViewportColor: TColor;
@@ -32,6 +47,7 @@ type
     FCommentColor: TColor;
     FStringColor: TColor;
     FDirectiveColor: TColor;
+    FTypeColor: TColor;
     FIdentifierColor: TColor;
 
     // Viewport metrics calculadas em Paint
@@ -43,23 +59,33 @@ type
     // Menu de contexto
     FPopupMenu: TPopupMenu;
     procedure SetSynEdit(AValue: TCustomSynEdit);
+    procedure SetZoom(AValue: TCodeMiniMapZoom);
+    procedure SetRenderMode(AValue: TCodeMiniMapRenderMode);
     procedure ScrollToY(AY: Integer);
     procedure BuildPopupMenu;
+    procedure UpdatePopupMenuChecks;
+    procedure OnMenuZoomClick(Sender: TObject);
+    procedure OnMenuRenderModeClick(Sender: TObject);
     procedure OnMenuWidthClick(Sender: TObject);
     procedure OnMenuToggleVisible(Sender: TObject);
     function IsPascalKeyword(const S: string): Boolean;
-    procedure DrawLineMiniature(const S: string; LineY, MaxW: Integer);
+    procedure DrawLineMiniature(const S: string; LineY, MaxW: Integer; APitch: Double);
   protected
     procedure Paint; override;
     procedure MouseDown(Button: TMouseButton; Shift: TShiftState; X, Y: Integer); override;
     procedure MouseMove(Shift: TShiftState; X, Y: Integer); override;
     procedure MouseUp(Button: TMouseButton; Shift: TShiftState; X, Y: Integer); override;
     procedure MouseLeave; override;
+    procedure DblClick; override;
     function DoMouseWheel(Shift: TShiftState; WheelDelta: Integer; MousePos: TPoint): Boolean; override;
   public
     constructor Create(AOwner: TComponent); override;
     destructor Destroy; override;
+    procedure ZoomIn;
+    procedure ZoomOut;
     property TargetSynEdit: TCustomSynEdit read FSynEdit write SetSynEdit;
+    property Zoom: TCodeMiniMapZoom read FZoom write SetZoom;
+    property RenderMode: TCodeMiniMapRenderMode read FRenderMode write SetRenderMode;
   end;
 
   { TCodeEditorMiniMapManager: Monitora abas do editor e acopla o minimapa à direita do TSynEdit }
@@ -99,7 +125,11 @@ begin
   Width := 110;
   DoubleBuffered := True;
   Cursor := crHandPoint;
-  ShowHint := False;
+  ShowHint := True;
+
+  // Zoom padrão: Normal (2px por linha)
+  FZoom := zm2x;
+  FRenderMode := rmSyntaxBlocks;
 
   // Tema escuro moderno de alto contraste (estilo VSCode / Delphi)
   FBackColor           := TColor($1E1E1E);
@@ -113,6 +143,7 @@ begin
   FCommentColor    := TColor($6A9955); // Verde
   FStringColor     := TColor($CE9178); // Laranja claro
   FDirectiveColor  := TColor($9E9E9E); // Cinza médio
+  FTypeColor       := TColor($4EC9B0); // Verde água (Teal)
   FIdentifierColor := TColor($CCCCCC); // Texto claro
 
   BuildPopupMenu;
@@ -126,32 +157,102 @@ end;
 
 procedure TCodeEditorMiniMapControl.BuildPopupMenu;
 var
-  Item: TMenuItem;
+  Item, SubItem: TMenuItem;
 begin
   FPopupMenu := TPopupMenu.Create(Self);
 
+  // Submenu Zoom / Escala
   Item := TMenuItem.Create(FPopupMenu);
-  Item.Caption := 'Largura: 80 px';
-  Item.Tag := 80;
-  Item.OnClick := @OnMenuWidthClick;
+  Item.Caption := 'Zoom / Escala (Ctrl + Roda do Mouse)';
+
+  SubItem := TMenuItem.Create(Item);
+  SubItem.Caption := 'Ajustar Todo o Código à Tela (Sem Zoom)';
+  SubItem.Tag := Ord(zmFit);
+  SubItem.OnClick := @OnMenuZoomClick;
+  Item.Add(SubItem);
+
+  SubItem := TMenuItem.Create(Item);
+  SubItem.Caption := 'Zoom 1x - Ultra Compacto (1px)';
+  SubItem.Tag := Ord(zm1x);
+  SubItem.OnClick := @OnMenuZoomClick;
+  Item.Add(SubItem);
+
+  SubItem := TMenuItem.Create(Item);
+  SubItem.Caption := 'Zoom 2x - Normal (2px - Padrão)';
+  SubItem.Tag := Ord(zm2x);
+  SubItem.OnClick := @OnMenuZoomClick;
+  Item.Add(SubItem);
+
+  SubItem := TMenuItem.Create(Item);
+  SubItem.Caption := 'Zoom 3x - Ampliado (3px)';
+  SubItem.Tag := Ord(zm3x);
+  SubItem.OnClick := @OnMenuZoomClick;
+  Item.Add(SubItem);
+
+  SubItem := TMenuItem.Create(Item);
+  SubItem.Caption := 'Zoom 4x - Detalhado (4px)';
+  SubItem.Tag := Ord(zm4x);
+  SubItem.OnClick := @OnMenuZoomClick;
+  Item.Add(SubItem);
+
+  FPopupMenu.Items.Add(Item);
+
+  // Submenu Estilo de Renderização
+  Item := TMenuItem.Create(FPopupMenu);
+  Item.Caption := 'Estilo Visual';
+
+  SubItem := TMenuItem.Create(Item);
+  SubItem.Caption := 'Barras de Sintaxe (Rápido e Limpo)';
+  SubItem.Tag := Ord(rmSyntaxBlocks);
+  SubItem.OnClick := @OnMenuRenderModeClick;
+  Item.Add(SubItem);
+
+  SubItem := TMenuItem.Create(Item);
+  SubItem.Caption := 'Micro-Texto Legível (Mini Font)';
+  SubItem.Tag := Ord(rmMicroText);
+  SubItem.OnClick := @OnMenuRenderModeClick;
+  Item.Add(SubItem);
+
   FPopupMenu.Items.Add(Item);
 
   Item := TMenuItem.Create(FPopupMenu);
-  Item.Caption := 'Largura: 110 px (Padrão)';
-  Item.Tag := 110;
-  Item.OnClick := @OnMenuWidthClick;
+  Item.Caption := '-';
   FPopupMenu.Items.Add(Item);
 
+  // Submenu Largura
   Item := TMenuItem.Create(FPopupMenu);
-  Item.Caption := 'Largura: 140 px';
-  Item.Tag := 140;
-  Item.OnClick := @OnMenuWidthClick;
-  FPopupMenu.Items.Add(Item);
+  Item.Caption := 'Largura do Mini-mapa';
 
-  Item := TMenuItem.Create(FPopupMenu);
-  Item.Caption := 'Largura: 180 px';
-  Item.Tag := 180;
-  Item.OnClick := @OnMenuWidthClick;
+  SubItem := TMenuItem.Create(Item);
+  SubItem.Caption := '80 px (Estreito)';
+  SubItem.Tag := 80;
+  SubItem.OnClick := @OnMenuWidthClick;
+  Item.Add(SubItem);
+
+  SubItem := TMenuItem.Create(Item);
+  SubItem.Caption := '110 px (Padrão)';
+  SubItem.Tag := 110;
+  SubItem.OnClick := @OnMenuWidthClick;
+  Item.Add(SubItem);
+
+  SubItem := TMenuItem.Create(Item);
+  SubItem.Caption := '140 px (Médio)';
+  SubItem.Tag := 140;
+  SubItem.OnClick := @OnMenuWidthClick;
+  Item.Add(SubItem);
+
+  SubItem := TMenuItem.Create(Item);
+  SubItem.Caption := '180 px (Largo)';
+  SubItem.Tag := 180;
+  SubItem.OnClick := @OnMenuWidthClick;
+  Item.Add(SubItem);
+
+  SubItem := TMenuItem.Create(Item);
+  SubItem.Caption := '220 px (Extra Largo)';
+  SubItem.Tag := 220;
+  SubItem.OnClick := @OnMenuWidthClick;
+  Item.Add(SubItem);
+
   FPopupMenu.Items.Add(Item);
 
   Item := TMenuItem.Create(FPopupMenu);
@@ -166,11 +267,44 @@ begin
   PopupMenu := FPopupMenu;
 end;
 
+procedure TCodeEditorMiniMapControl.UpdatePopupMenuChecks;
+var
+  ZoomMenu, RenderMenu, WidthMenu: TMenuItem;
+  I: Integer;
+begin
+  if (FPopupMenu = nil) or (FPopupMenu.Items.Count < 4) then Exit;
+
+  ZoomMenu := FPopupMenu.Items[0];
+  for I := 0 to ZoomMenu.Count - 1 do
+    ZoomMenu.Items[I].Checked := (ZoomMenu.Items[I].Tag = Ord(FZoom));
+
+  RenderMenu := FPopupMenu.Items[1];
+  for I := 0 to RenderMenu.Count - 1 do
+    RenderMenu.Items[I].Checked := (RenderMenu.Items[I].Tag = Ord(FRenderMode));
+
+  WidthMenu := FPopupMenu.Items[3];
+  for I := 0 to WidthMenu.Count - 1 do
+    WidthMenu.Items[I].Checked := (WidthMenu.Items[I].Tag = Width);
+end;
+
+procedure TCodeEditorMiniMapControl.OnMenuZoomClick(Sender: TObject);
+begin
+  if Sender is TMenuItem then
+    Zoom := TCodeMiniMapZoom(TMenuItem(Sender).Tag);
+end;
+
+procedure TCodeEditorMiniMapControl.OnMenuRenderModeClick(Sender: TObject);
+begin
+  if Sender is TMenuItem then
+    RenderMode := TCodeMiniMapRenderMode(TMenuItem(Sender).Tag);
+end;
+
 procedure TCodeEditorMiniMapControl.OnMenuWidthClick(Sender: TObject);
 begin
   if Sender is TMenuItem then
   begin
     Width := TMenuItem(Sender).Tag;
+    UpdatePopupMenuChecks;
     Invalidate;
   end;
 end;
@@ -187,6 +321,70 @@ begin
     FSynEdit := AValue;
     Invalidate;
   end;
+end;
+
+procedure TCodeEditorMiniMapControl.SetZoom(AValue: TCodeMiniMapZoom);
+var
+  ZoomDesc: string;
+begin
+  if FZoom <> AValue then
+  begin
+    FZoom := AValue;
+    UpdatePopupMenuChecks;
+
+    case FZoom of
+      zmFit: ZoomDesc := 'Ajustar Todo o Código (Sem Zoom)';
+      zm1x:  ZoomDesc := 'Zoom 1x (Ultra Compacto)';
+      zm2x:  ZoomDesc := 'Zoom 2x (Normal)';
+      zm3x:  ZoomDesc := 'Zoom 3x (Ampliado)';
+      zm4x:  ZoomDesc := 'Zoom 4x (Detalhado)';
+    end;
+    Hint := Format('Mini-mapa: %s [Ctrl+Wheel para alterar]', [ZoomDesc]);
+
+    Invalidate;
+  end;
+end;
+
+procedure TCodeEditorMiniMapControl.SetRenderMode(AValue: TCodeMiniMapRenderMode);
+begin
+  if FRenderMode <> AValue then
+  begin
+    FRenderMode := AValue;
+    UpdatePopupMenuChecks;
+    Invalidate;
+  end;
+end;
+
+procedure TCodeEditorMiniMapControl.ZoomIn;
+begin
+  case FZoom of
+    zmFit: Zoom := zm1x;
+    zm1x:  Zoom := zm2x;
+    zm2x:  Zoom := zm3x;
+    zm3x:  Zoom := zm4x;
+    zm4x:  Exit;
+  end;
+end;
+
+procedure TCodeEditorMiniMapControl.ZoomOut;
+begin
+  case FZoom of
+    zmFit: Exit;
+    zm1x:  Zoom := zmFit;
+    zm2x:  Zoom := zm1x;
+    zm3x:  Zoom := zm2x;
+    zm4x:  Zoom := zm3x;
+  end;
+end;
+
+procedure TCodeEditorMiniMapControl.DblClick;
+begin
+  inherited DblClick;
+  // Duplo-clique alterna rapidamente entre visão geral completa (Sem Zoom) e Normal
+  if FZoom = zmFit then
+    Zoom := zm2x
+  else
+    Zoom := zmFit;
 end;
 
 function TCodeEditorMiniMapControl.IsPascalKeyword(const S: string): Boolean;
@@ -209,7 +407,7 @@ begin
   Result := False;
 end;
 
-procedure TCodeEditorMiniMapControl.DrawLineMiniature(const S: string; LineY, MaxW: Integer);
+procedure TCodeEditorMiniMapControl.DrawLineMiniature(const S: string; LineY, MaxW: Integer; APitch: Double);
 var
   Len, I, WordStart: Integer;
   Indent: Integer;
@@ -218,9 +416,22 @@ var
   InString: Boolean;
   CurX: Integer;
   Ch: Char;
+  CharW: Integer;
+  UseMicroText: Boolean;
+  TokenColor: TColor;
 begin
   Len := Length(S);
   if Len = 0 then Exit;
+
+  // Largura horizontal proporcional ao zoom
+  if APitch < 1.8 then
+    CharW := 1
+  else if APitch >= 3.5 then
+    CharW := 3
+  else
+    CharW := 2;
+
+  UseMicroText := (FRenderMode = rmMicroText) and (APitch >= 3.0);
 
   // Calcula indentação inicial
   Indent := 0;
@@ -234,13 +445,13 @@ begin
 
   if Indent >= Len then Exit;
 
-  CurX := LEFT_MARGIN + Min(60, Indent * CHAR_WIDTH);
+  CurX := LEFT_MARGIN + Min(60, Indent * CharW);
 
   // Linha de comentário completo
   if (Indent + 2 <= Len) and (S[Indent + 1] = '/') and (S[Indent + 2] = '/') then
   begin
     X1 := CurX;
-    X2 := Min(MaxW, X1 + (Len - Indent) * CHAR_WIDTH);
+    X2 := Min(MaxW, X1 + (Len - Indent) * CharW);
     Canvas.Pen.Color := FCommentColor;
     Canvas.Line(X1, LineY, X2, LineY);
     Exit;
@@ -250,7 +461,7 @@ begin
   if (Indent + 2 <= Len) and (S[Indent + 1] = '{') and (S[Indent + 2] = '$') then
   begin
     X1 := CurX;
-    X2 := Min(MaxW, X1 + (Len - Indent) * CHAR_WIDTH);
+    X2 := Min(MaxW, X1 + (Len - Indent) * CharW);
     Canvas.Pen.Color := FDirectiveColor;
     Canvas.Line(X1, LineY, X2, LineY);
     Exit;
@@ -268,7 +479,7 @@ begin
       InString := not InString;
       Canvas.Pen.Color := FStringColor;
       Canvas.Line(CurX, LineY, Min(MaxW, CurX + 3), LineY);
-      Inc(CurX, 4);
+      Inc(CurX, CharW + 2);
       Inc(I);
       Continue;
     end;
@@ -277,7 +488,7 @@ begin
     begin
       Canvas.Pen.Color := FStringColor;
       Canvas.Line(CurX, LineY, Min(MaxW, CurX + 2), LineY);
-      Inc(CurX, 2);
+      Inc(CurX, CharW);
       Inc(I);
       Continue;
     end;
@@ -286,7 +497,7 @@ begin
     begin
       // Restante da linha é comentário
       Canvas.Pen.Color := FCommentColor;
-      Canvas.Line(CurX, LineY, Min(MaxW, CurX + (Len - I + 1) * CHAR_WIDTH), LineY);
+      Canvas.Line(CurX, LineY, Min(MaxW, CurX + (Len - I + 1) * CharW), LineY);
       Break;
     end;
 
@@ -298,27 +509,38 @@ begin
       WordStr := Copy(S, WordStart, I - WordStart);
 
       if IsPascalKeyword(WordStr) then
-        Canvas.Pen.Color := FKeywordColor
+        TokenColor := FKeywordColor
       else if (Length(WordStr) > 1) and (WordStr[1] in ['T', 'I']) and (WordStr[2] in ['A'..'Z']) then
-        Canvas.Pen.Color := TColor($4EC9B0) // Tipos/Classes (Teal)
+        TokenColor := FTypeColor
       else
-        Canvas.Pen.Color := FIdentifierColor;
+        TokenColor := FIdentifierColor;
 
       X1 := CurX;
-      X2 := Min(MaxW, X1 + Length(WordStr) * CHAR_WIDTH);
-      Canvas.Line(X1, LineY, X2, LineY);
-      CurX := X2 + 2;
+      X2 := Min(MaxW, X1 + Length(WordStr) * CharW);
+
+      if UseMicroText then
+      begin
+        Canvas.Font.Color := TokenColor;
+        Canvas.TextOut(X1, LineY - 2, WordStr);
+        CurX := CurX + Canvas.TextWidth(WordStr) + 2;
+      end
+      else
+      begin
+        Canvas.Pen.Color := TokenColor;
+        Canvas.Line(X1, LineY, X2, LineY);
+        CurX := X2 + CharW;
+      end;
     end
     else
     begin
       if not (Ch in [' ', #9]) then
       begin
         Canvas.Pen.Color := FIdentifierColor;
-        Canvas.Line(CurX, LineY, Min(MaxW, CurX + 2), LineY);
-        Inc(CurX, 3);
+        Canvas.Line(CurX, LineY, Min(MaxW, CurX + CharW), LineY);
+        Inc(CurX, CharW + 1);
       end
       else
-        Inc(CurX, 2);
+        Inc(CurX, CharW);
       Inc(I);
     end;
   end;
@@ -327,6 +549,7 @@ end;
 procedure TCodeEditorMiniMapControl.Paint;
 var
   H, TotalLines, LinesInWindow, MaxTopLine: Integer;
+  Pitch: Double;
   TotalContentH, MaxScroll, ScrollOffsetY: Integer;
   TopLine: Integer;
   Progress: Double;
@@ -354,46 +577,81 @@ begin
   LinesInWindow := Max(1, FSynEdit.LinesInWindow);
   TopLine := Max(1, FSynEdit.TopLine);
   MaxTopLine := Max(1, TotalLines - LinesInWindow + 1);
-  TotalContentH := TotalLines * LINE_PITCH;
   MaxW := ClientWidth - RIGHT_MARGIN;
 
-  // 1. Cálculo de rolagem do minimapa e limites visíveis
-  if TotalContentH <= H then
+  if (FRenderMode = rmMicroText) then
   begin
-    ScrollOffsetY := 0;
-    FirstLine := 1;
-    LastLine := TotalLines;
-    FVHeight := Max(16, Round(LinesInWindow * LINE_PITCH));
-    FVTop := Round((TopLine - 1) * LINE_PITCH);
-  end
-  else
-  begin
-    MaxScroll := TotalContentH - H;
-    Progress := (TopLine - 1) / Max(1, MaxTopLine - 1);
-    Progress := Max(0.0, Min(1.0, Progress));
+    Canvas.Font.Name := 'Arial';
+    Canvas.Font.Size := 3;
+    Canvas.Brush.Style := bsClear;
+  end;
 
-    ScrollOffsetY := Round(Progress * MaxScroll);
-    FirstLine := Max(1, (ScrollOffsetY div LINE_PITCH) + 1);
-    LastLine := Min(TotalLines, FirstLine + (H div LINE_PITCH) + 2);
+  // 1. Determina o Pitch e limites de acordo com o nível de Zoom
+  case FZoom of
+    zmFit:
+    begin
+      // SEM ZOOM: Ajusta o documento inteiro na altura da janela
+      Pitch := H / Max(1, TotalLines);
+      ScrollOffsetY := 0;
+      FirstLine := 1;
+      LastLine := TotalLines;
 
-    FVHeight := Max(20, Round(H * (LinesInWindow / TotalLines)));
-    FVHeight := Min(H, FVHeight);
-    FVTop := Round(Progress * (H - FVHeight));
+      FVTop := Round((TopLine - 1) * Pitch);
+      FVHeight := Max(14, Round(LinesInWindow * Pitch));
+      FVHeight := Min(H - FVTop, FVHeight);
+    end;
+
+    zm1x, zm2x, zm3x, zm4x:
+    begin
+      case FZoom of
+        zm1x: Pitch := 1.0;
+        zm2x: Pitch := 2.0;
+        zm3x: Pitch := 3.0;
+        zm4x: Pitch := 4.0;
+      else
+        Pitch := 2.0;
+      end;
+
+      TotalContentH := Round(TotalLines * Pitch);
+
+      if TotalContentH <= H then
+      begin
+        ScrollOffsetY := 0;
+        FirstLine := 1;
+        LastLine := TotalLines;
+        FVTop := Round((TopLine - 1) * Pitch);
+        FVHeight := Max(16, Round(LinesInWindow * Pitch));
+      end
+      else
+      begin
+        MaxScroll := TotalContentH - H;
+        Progress := (TopLine - 1) / Max(1, MaxTopLine - 1);
+        Progress := Max(0.0, Min(1.0, Progress));
+
+        ScrollOffsetY := Round(Progress * MaxScroll);
+        FirstLine := Max(1, Round(ScrollOffsetY / Pitch) + 1);
+        LastLine := Min(TotalLines, FirstLine + Round(H / Pitch) + 2);
+
+        FVHeight := Max(20, Round(H * (LinesInWindow / TotalLines)));
+        FVHeight := Min(H, FVHeight);
+        FVTop := Round(Progress * (H - FVHeight));
+      end;
+    end;
   end;
 
   // 2. Renderiza as linhas de código visíveis na área do minimapa
   Canvas.Pen.Width := 1;
   for L := FirstLine to LastLine do
   begin
-    LineY := (L - 1) * LINE_PITCH - ScrollOffsetY;
+    LineY := Round((L - 1) * Pitch) - ScrollOffsetY;
     if (LineY >= 0) and (LineY < H) then
     begin
       LineStr := FSynEdit.Lines[L - 1];
-      DrawLineMiniature(LineStr, LineY, MaxW);
+      DrawLineMiniature(LineStr, LineY, MaxW, Pitch);
     end;
   end;
 
-  // 3. Renderiza o retângulo translúcido da Viewport (área ativa visível no editor)
+  // 3. Renderiza o retângulo translúcido da Viewport (área visível no editor)
   VRect := Rect(1, FVTop, ClientWidth - 1, FVTop + FVHeight);
 
   Canvas.Brush.Style := bsSolid;
@@ -413,7 +671,8 @@ end;
 procedure TCodeEditorMiniMapControl.ScrollToY(AY: Integer);
 var
   H, TotalLines, LinesInWindow, MaxTopLine: Integer;
-  TotalHeight, VHeight: Integer;
+  Pitch: Double;
+  TotalContentH, VHeight: Integer;
   Progress: Double;
   TargetTopLine: Integer;
 begin
@@ -425,19 +684,44 @@ begin
   H := ClientHeight;
   LinesInWindow := Max(1, FSynEdit.LinesInWindow);
   MaxTopLine := Max(1, TotalLines - LinesInWindow + 1);
-  TotalHeight := TotalLines * LINE_PITCH;
 
-  if TotalHeight <= H then
-  begin
-    TargetTopLine := 1 + (AY div LINE_PITCH) - (LinesInWindow div 2);
-  end
-  else
-  begin
-    VHeight := Max(20, Round(H * (LinesInWindow / TotalLines)));
-    VHeight := Min(H, VHeight);
-    Progress := (AY - (VHeight div 2)) / Max(1, H - VHeight);
-    Progress := Max(0.0, Min(1.0, Progress));
-    TargetTopLine := 1 + Round(Progress * (MaxTopLine - 1));
+  case FZoom of
+    zmFit:
+    begin
+      Pitch := H / Max(1, TotalLines);
+      VHeight := Max(14, Round(LinesInWindow * Pitch));
+      VHeight := Min(H, VHeight);
+      Progress := (AY - (VHeight div 2)) / Max(1, H - VHeight);
+      Progress := Max(0.0, Min(1.0, Progress));
+      TargetTopLine := 1 + Round(Progress * (MaxTopLine - 1));
+    end;
+
+    zm1x, zm2x, zm3x, zm4x:
+    begin
+      case FZoom of
+        zm1x: Pitch := 1.0;
+        zm2x: Pitch := 2.0;
+        zm3x: Pitch := 3.0;
+        zm4x: Pitch := 4.0;
+      else
+        Pitch := 2.0;
+      end;
+
+      TotalContentH := Round(TotalLines * Pitch);
+
+      if TotalContentH <= H then
+      begin
+        TargetTopLine := 1 + Round(AY / Pitch) - (LinesInWindow div 2);
+      end
+      else
+      begin
+        VHeight := Max(20, Round(H * (LinesInWindow / TotalLines)));
+        VHeight := Min(H, VHeight);
+        Progress := (AY - (VHeight div 2)) / Max(1, H - VHeight);
+        Progress := Max(0.0, Min(1.0, Progress));
+        TargetTopLine := 1 + Round(Progress * (MaxTopLine - 1));
+      end;
+    end;
   end;
 
   TargetTopLine := Max(1, Min(MaxTopLine, TargetTopLine));
@@ -456,6 +740,10 @@ begin
     FDragging := True;
     MouseCapture := True;
     ScrollToY(Y);
+  end
+  else if Button = mbRight then
+  begin
+    UpdatePopupMenuChecks;
   end;
 end;
 
@@ -505,6 +793,19 @@ var
   LinesToScroll: Integer;
 begin
   Result := inherited DoMouseWheel(Shift, WheelDelta, MousePos);
+
+  // Ctrl + Wheel: Ajusta o Zoom instantaneamente!
+  if ssCtrl in Shift then
+  begin
+    if WheelDelta > 0 then
+      ZoomIn
+    else
+      ZoomOut;
+    Result := True;
+    Exit;
+  end;
+
+  // Sem Ctrl: Rola o código do editor
   if (FSynEdit <> nil) and (FSynEdit.Lines <> nil) then
   begin
     LinesToScroll := 5;
