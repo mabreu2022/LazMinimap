@@ -8,13 +8,14 @@ unit lazarus_minimap_ide;
 interface
 
 uses
-  LazarusDesignerMiniMap, LazarusPackageIntf;
+  LazarusDesignerMiniMap, LazarusCodeMiniMap, LazarusPackageIntf;
 
 implementation
 
 procedure Register;
 begin
   RegisterUnit('LazarusDesignerMiniMap', @LazarusDesignerMiniMap.Register);
+  RegisterUnit('LazarusCodeMiniMap', @LazarusCodeMiniMap.Register);
 end;
 
 initialization

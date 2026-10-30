@@ -17,6 +17,11 @@
         <HasRegisterProc Value="True"/>
         <UnitName Value="LazarusDesignerMiniMap"/>
       </Item>
+      <Item>
+        <Filename Value="lazaruscodeminimap.pas"/>
+        <HasRegisterProc Value="True"/>
+        <UnitName Value="LazarusCodeMiniMap"/>
+      </Item>
     </Files>
     <RequiredPkgs>
       <Item>
