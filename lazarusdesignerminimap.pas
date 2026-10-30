@@ -147,7 +147,7 @@ begin
   FSelectionColor := TColor($00A2E8);
 
   DoubleBuffered := True;
-  Cursor := crHandPoint;
+  Cursor := crDefault;
   ShowHint := True;
 
   BuildPopupMenu;
@@ -243,11 +243,14 @@ begin
 end;
 
 procedure TFormDesignerMiniMapControl.OnMenuCenterFormClick(Sender: TObject);
+var
+  CL, CT: Integer;
 begin
   if FTargetForm = nil then Exit;
+  CL := Max(0, (REF_SCREEN_WIDTH - FTargetForm.Width) div 2);
+  CT := Max(0, (REF_SCREEN_HEIGHT - FTargetForm.Height) div 2);
+  SetComponentLeftTopOrDesignInfo(FTargetForm, CL, CT);
   FTargetForm.Position := poDesigned;
-  FTargetForm.Left := Max(0, (REF_SCREEN_WIDTH - FTargetForm.Width) div 2);
-  FTargetForm.Top := Max(0, (REF_SCREEN_HEIGHT - FTargetForm.Height) div 2);
   NotifyFormChanged;
   Invalidate;
 end;
@@ -255,9 +258,8 @@ end;
 procedure TFormDesignerMiniMapControl.OnMenuTopLeftFormClick(Sender: TObject);
 begin
   if FTargetForm = nil then Exit;
+  SetComponentLeftTopOrDesignInfo(FTargetForm, 0, 0);
   FTargetForm.Position := poDesigned;
-  FTargetForm.Left := 0;
-  FTargetForm.Top := 0;
   NotifyFormChanged;
   Invalidate;
 end;
@@ -349,37 +351,34 @@ begin
     begin
       NewL := Margin;
       NewT := ParentH - Height - Margin;
-      Anchors := [akLeft, akBottom];
     end;
 
     mmcBottomRight:
     begin
       NewL := ParentW - Width - Margin;
       NewT := ParentH - Height - Margin;
-      Anchors := [akRight, akBottom];
     end;
 
     mmcTopLeft:
     begin
       NewL := Margin;
       NewT := Margin;
-      Anchors := [akLeft, akTop];
     end;
 
     mmcTopRight:
     begin
       NewL := ParentW - Width - Margin;
       NewT := Margin;
-      Anchors := [akRight, akTop];
     end;
 
     mmcFloating:
     begin
-      Anchors := [];
+      Anchors := [akLeft, akTop];
       Exit;
     end;
   end;
 
+  Anchors := [akLeft, akTop];
   if (Left <> NewL) or (Top <> NewT) then
     SetBounds(NewL, NewT, Width, Height);
   BringToFront;
@@ -411,12 +410,16 @@ end;
 function TFormDesignerMiniMapControl.GetFormVirtualScreenLeft: Integer;
 var
   MaxL: Integer;
+  FL, FT: Integer;
 begin
   if FTargetForm = nil then Exit(0);
   if FTargetForm.Position in [poScreenCenter, poDesktopCenter, poMainFormCenter, poOwnerFormCenter] then
     Result := (REF_SCREEN_WIDTH - FTargetForm.Width) div 2
   else
-    Result := FTargetForm.Left;
+  begin
+    GetComponentLeftTopOrDesignInfo(FTargetForm, FL, FT);
+    Result := FL;
+  end;
 
   MaxL := Max(0, REF_SCREEN_WIDTH - FTargetForm.Width);
   Result := Max(0, Min(MaxL, Result));
@@ -425,12 +428,16 @@ end;
 function TFormDesignerMiniMapControl.GetFormVirtualScreenTop: Integer;
 var
   MaxT: Integer;
+  FL, FT: Integer;
 begin
   if FTargetForm = nil then Exit(0);
   if FTargetForm.Position in [poScreenCenter, poDesktopCenter, poMainFormCenter, poOwnerFormCenter] then
     Result := (REF_SCREEN_HEIGHT - FTargetForm.Height) div 2
   else
-    Result := FTargetForm.Top;
+  begin
+    GetComponentLeftTopOrDesignInfo(FTargetForm, FL, FT);
+    Result := FT;
+  end;
 
   MaxT := Max(0, REF_SCREEN_HEIGHT - FTargetForm.Height);
   Result := Max(0, Min(MaxT, Result));
@@ -822,6 +829,8 @@ procedure TFormDesignerMiniMapControl.MouseDown(Button: TMouseButton; Shift: TSh
 begin
   inherited MouseDown(Button, Shift, X, Y);
 
+  CalculateMetrics;
+
   // 1. Clique na barra de cabeçalho
   if Y <= FHeaderHeight then
   begin
@@ -912,7 +921,7 @@ begin
       NewTop := Max(0, Min(Parent.ClientHeight - Height, NewTop));
     end;
     FCorner := mmcFloating;
-    Anchors := [];
+    Anchors := [akLeft, akTop];
     SetBounds(NewLeft, NewTop, Width, Height);
     BringToFront;
     Exit;
@@ -960,13 +969,9 @@ begin
       NewLeft := Max(0, Min(MaxL, NewLeft));
       NewTop := Max(0, Min(MaxT, NewTop));
 
-      if (FTargetForm.Left <> NewLeft) or (FTargetForm.Top <> NewTop) or (FTargetForm.Position <> poDesigned) then
-      begin
-        FTargetForm.Position := poDesigned;
-        FTargetForm.Left := NewLeft;
-        FTargetForm.Top := NewTop;
-        Invalidate;
-      end;
+      SetComponentLeftTopOrDesignInfo(FTargetForm, NewLeft, NewTop);
+      FTargetForm.Position := poDesigned;
+      Invalidate;
     end;
     Exit;
   end;
@@ -974,6 +979,8 @@ begin
   // 3. Hover, Cursores e Dicas
   if (FTargetForm <> nil) and not FCollapsed then
   begin
+    CalculateMetrics;
+
     if PtInRect(FFormRect, Point(X, Y)) then
       Cursor := crSizeAll
     else
@@ -986,7 +993,7 @@ begin
       if FHoveredComponent <> nil then
         Hint := Format('%s: %s', [FHoveredComponent.Name, FHoveredComponent.ClassName])
       else if PtInRect(FFormRect, Point(X, Y)) then
-        Hint := Format('%s [Left: %d, Top: %d] - Arraste para mover na tela 1080p', [FTargetForm.Name, FTargetForm.Left, FTargetForm.Top])
+        Hint := Format('%s [Left: %d, Top: %d] - Arraste para mover na tela 1080p', [FTargetForm.Name, GetFormVirtualScreenLeft, GetFormVirtualScreenTop])
       else
         Hint := '';
       Invalidate;
@@ -1086,8 +1093,7 @@ end;
 function TFormDesignerMiniMapManager.IsFormDesignerActiveAndVisible(AForm: TCustomForm; out ADesignArea: TWinControl): Boolean;
 var
   ParentCtrl: TControl;
-  TabSh: TTabSheet;
-  Pgc: TPageControl;
+  Candidate: TWinControl;
   LoopGuard: Integer;
 begin
   Result := False;
@@ -1099,31 +1105,48 @@ begin
     Exit(False);
   {$ENDIF}
 
-  ADesignArea := AForm;
+  // Se AForm não tem parent (janela flutuante separada), não acopla
+  if AForm.Parent = nil then
+    Exit(False);
 
+  Candidate := nil;
   ParentCtrl := AForm.Parent;
   LoopGuard := 0;
   while (ParentCtrl <> nil) and (LoopGuard < 30) do
   begin
     Inc(LoopGuard);
+    // Se algum container pai estiver oculto (ex: o usuário trocou para a aba Código), o minimap deve sumir
     if not ParentCtrl.Visible then
       Exit(False);
 
-    if ParentCtrl is TTabSheet then
+    // Procura por TCustomPage (TTabSheet, TAnchorDockPage, etc.) ou classe de aba/página
+    if (ParentCtrl is TCustomPage) or (Pos('Page', ParentCtrl.ClassName) > 0) or (Pos('TabSheet', ParentCtrl.ClassName) > 0) then
     begin
-      TabSh := TTabSheet(ParentCtrl);
-      Pgc := TabSh.PageControl;
-      if (Pgc <> nil) and (Pgc.ActivePage <> TabSh) then
-        Exit(False); // Usuário está na aba de Código!
-
-      ADesignArea := TabSh;
-      Break; // A área pai ideal para o MiniMap é a TabSheet do designer!
+      Candidate := TWinControl(ParentCtrl);
+      Break;
     end;
+
+    // Se encontrar qualquer container que não seja AForm, guarda como candidato
+    if (Candidate = nil) and (ParentCtrl is TWinControl) and (ParentCtrl <> AForm) then
+      Candidate := TWinControl(ParentCtrl);
 
     ParentCtrl := ParentCtrl.Parent;
   end;
 
-  Result := (ADesignArea <> nil);
+  if Candidate <> nil then
+    ADesignArea := Candidate
+  else
+    ADesignArea := AForm.Parent;
+
+  // REGRA DE OURO: O Mini-mapa NUNCA, SOB NENHUMA HIPÓTESE, PODE TER AForm COMO PAI!
+  // Se for AForm, causa recursão e Stack Overflow ao esticar o form!
+  if (ADesignArea = nil) or (ADesignArea = AForm) then
+  begin
+    ADesignArea := nil;
+    Exit(False);
+  end;
+
+  Result := ADesignArea.HandleAllocated and ADesignArea.Visible;
 end;
 
 function TFormDesignerMiniMapManager.FindActiveDesignedForm(out ADesignArea: TWinControl): TCustomForm;
@@ -1164,12 +1187,15 @@ begin
 end;
 
 function TFormDesignerMiniMapManager.ComputeSignature(AForm: TCustomForm): Int64;
+var
+  FL, FT: Integer;
 begin
   Result := 19;
   if AForm <> nil then
   begin
-    Result := (Result * 31 + AForm.Left) mod 1000000007;
-    Result := (Result * 31 + AForm.Top) mod 1000000007;
+    GetComponentLeftTopOrDesignInfo(AForm, FL, FT);
+    Result := (Result * 31 + FL) mod 1000000007;
+    Result := (Result * 31 + FT) mod 1000000007;
     Result := (Result * 31 + AForm.Width) mod 1000000007;
     Result := (Result * 31 + AForm.Height) mod 1000000007;
     Result := (Result * 31 + Ord(AForm.Position)) mod 1000000007;
@@ -1217,13 +1243,15 @@ begin
       Exit;
     end;
 
-    // Se mudou de aba/área pai ou primeira vez, acopla nativamente como filho direto da TabSheet
+    // Acopla como filho da página do designer (nunca de AForm!)
     if FMiniMap.Parent <> DesignArea then
     begin
       FMiniMap.Parent := DesignArea;
       FMiniMap.BringToFront;
       FMiniMap.UpdateDockPosition;
-    end;
+    end
+    else if FMiniMap.Corner <> mmcFloating then
+      FMiniMap.UpdateDockPosition;
 
     if FMiniMap.TargetForm <> DesignedForm then
       FMiniMap.TargetForm := DesignedForm;
