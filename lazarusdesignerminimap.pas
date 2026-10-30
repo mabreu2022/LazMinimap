@@ -58,6 +58,9 @@ type
     FHasMovedForm: Boolean;
     FSnappedCenterH: Boolean;
     FSnappedCenterV: Boolean;
+    FVirtualFormLeft: Integer;
+    FVirtualFormTop: Integer;
+    FVirtualFormValid: Boolean;
 
     // Menu de contexto
     FPopupMenu: TPopupMenu;
@@ -67,8 +70,8 @@ type
     procedure SetCollapsed(AValue: Boolean);
     function GetControlBoundsInForm(ACtrl: TControl): TRect;
     function FindComponentAtMiniPos(AX, AY: Integer): TComponent;
-    function GetFormVirtualScreenLeft: Integer;
-    function GetFormVirtualScreenTop: Integer;
+    procedure SyncVirtualFormPosition;
+    procedure CommitFormPosition;
     procedure NotifyFormChanged;
     procedure CalculateMetrics;
     procedure DrawControlRecursive(ACtrl: TControl; AFormOrigin: TPoint; ADepth: Integer = 0);
@@ -243,24 +246,20 @@ begin
 end;
 
 procedure TFormDesignerMiniMapControl.OnMenuCenterFormClick(Sender: TObject);
-var
-  CL, CT: Integer;
 begin
   if FTargetForm = nil then Exit;
-  CL := Max(0, (REF_SCREEN_WIDTH - FTargetForm.Width) div 2);
-  CT := Max(0, (REF_SCREEN_HEIGHT - FTargetForm.Height) div 2);
-  SetComponentLeftTopOrDesignInfo(FTargetForm, CL, CT);
-  FTargetForm.Position := poDesigned;
-  NotifyFormChanged;
+  FVirtualFormLeft := Max(0, (REF_SCREEN_WIDTH - FTargetForm.Width) div 2);
+  FVirtualFormTop := Max(0, (REF_SCREEN_HEIGHT - FTargetForm.Height) div 2);
+  CommitFormPosition;
   Invalidate;
 end;
 
 procedure TFormDesignerMiniMapControl.OnMenuTopLeftFormClick(Sender: TObject);
 begin
   if FTargetForm = nil then Exit;
-  SetComponentLeftTopOrDesignInfo(FTargetForm, 0, 0);
-  FTargetForm.Position := poDesigned;
-  NotifyFormChanged;
+  FVirtualFormLeft := 0;
+  FVirtualFormTop := 0;
+  CommitFormPosition;
   Invalidate;
 end;
 
@@ -268,6 +267,8 @@ procedure TFormDesignerMiniMapControl.OnMenuSetScreenCenterClick(Sender: TObject
 begin
   if FTargetForm = nil then Exit;
   FTargetForm.Position := poScreenCenter;
+  FVirtualFormLeft := Max(0, (REF_SCREEN_WIDTH - FTargetForm.Width) div 2);
+  FVirtualFormTop := Max(0, (REF_SCREEN_HEIGHT - FTargetForm.Height) div 2);
   NotifyFormChanged;
   Invalidate;
 end;
@@ -276,8 +277,58 @@ procedure TFormDesignerMiniMapControl.OnMenuSetDesignedClick(Sender: TObject);
 begin
   if FTargetForm = nil then Exit;
   FTargetForm.Position := poDesigned;
-  NotifyFormChanged;
+  CommitFormPosition;
   Invalidate;
+end;
+
+procedure TFormDesignerMiniMapControl.CommitFormPosition;
+begin
+  if FTargetForm = nil then Exit;
+
+  // 1. Armazena a informação de design no componente (DesignInfo)
+  FTargetForm.DesignInfo := LeftTopToDesignInfo(FVirtualFormLeft, FVirtualFormTop);
+  SetDesignInfoLeft(FTargetForm, FVirtualFormLeft);
+  SetDesignInfoTop(FTargetForm, FVirtualFormTop);
+
+  // 2. Define as propriedades Left, Top e Position via RTTI
+  TrySetOrdProp(FTargetForm, 'Left', FVirtualFormLeft);
+  TrySetOrdProp(FTargetForm, 'Top', FVirtualFormTop);
+  FTargetForm.Position := poDesigned;
+
+  // 3. Notifica o Lazarus IDE Designer e Object Inspector
+  NotifyFormChanged;
+end;
+
+procedure TFormDesignerMiniMapControl.SyncVirtualFormPosition;
+var
+  FL, FT: Integer;
+begin
+  if FTargetForm = nil then
+  begin
+    FVirtualFormLeft := 0;
+    FVirtualFormTop := 0;
+    FVirtualFormValid := False;
+    Exit;
+  end;
+
+  if FTargetForm.Position in [poScreenCenter, poDesktopCenter, poMainFormCenter, poOwnerFormCenter] then
+  begin
+    FVirtualFormLeft := Max(0, (REF_SCREEN_WIDTH - FTargetForm.Width) div 2);
+    FVirtualFormTop := Max(0, (REF_SCREEN_HEIGHT - FTargetForm.Height) div 2);
+  end
+  else
+  begin
+    FL := LeftFromDesignInfo(FTargetForm.DesignInfo);
+    FT := TopFromDesignInfo(FTargetForm.DesignInfo);
+    if (FL <= 0) and (FT <= 0) and (FTargetForm.Left > 0) then
+    begin
+      FL := FTargetForm.Left;
+      FT := FTargetForm.Top;
+    end;
+    FVirtualFormLeft := Max(0, Min(Max(0, REF_SCREEN_WIDTH - FTargetForm.Width), FL));
+    FVirtualFormTop := Max(0, Min(Max(0, REF_SCREEN_HEIGHT - FTargetForm.Height), FT));
+  end;
+  FVirtualFormValid := True;
 end;
 
 procedure TFormDesignerMiniMapControl.NotifyFormChanged;
@@ -296,6 +347,8 @@ begin
   if FTargetForm <> AValue then
   begin
     FTargetForm := AValue;
+    FVirtualFormValid := False;
+    SyncVirtualFormPosition;
     Invalidate;
   end;
 end;
@@ -407,49 +460,13 @@ begin
   Result := Bounds(L, T, ACtrl.Width, ACtrl.Height);
 end;
 
-function TFormDesignerMiniMapControl.GetFormVirtualScreenLeft: Integer;
-var
-  MaxL: Integer;
-  FL, FT: Integer;
-begin
-  if FTargetForm = nil then Exit(0);
-  if FTargetForm.Position in [poScreenCenter, poDesktopCenter, poMainFormCenter, poOwnerFormCenter] then
-    Result := (REF_SCREEN_WIDTH - FTargetForm.Width) div 2
-  else
-  begin
-    GetComponentLeftTopOrDesignInfo(FTargetForm, FL, FT);
-    Result := FL;
-  end;
-
-  MaxL := Max(0, REF_SCREEN_WIDTH - FTargetForm.Width);
-  Result := Max(0, Min(MaxL, Result));
-end;
-
-function TFormDesignerMiniMapControl.GetFormVirtualScreenTop: Integer;
-var
-  MaxT: Integer;
-  FL, FT: Integer;
-begin
-  if FTargetForm = nil then Exit(0);
-  if FTargetForm.Position in [poScreenCenter, poDesktopCenter, poMainFormCenter, poOwnerFormCenter] then
-    Result := (REF_SCREEN_HEIGHT - FTargetForm.Height) div 2
-  else
-  begin
-    GetComponentLeftTopOrDesignInfo(FTargetForm, FL, FT);
-    Result := FT;
-  end;
-
-  MaxT := Max(0, REF_SCREEN_HEIGHT - FTargetForm.Height);
-  Result := Max(0, Min(MaxT, Result));
-end;
-
 procedure TFormDesignerMiniMapControl.CalculateMetrics;
 var
   AvailW, AvailH: Integer;
   FormW, FormH: Integer;
   FormL, FormT: Integer;
   FW, FH: Integer;
-  ScreenFormLeft, ScreenFormTop: Integer;
+  MaxL, MaxT: Integer;
 begin
   AvailW := ClientWidth - (2 * FMargin);
   AvailH := ClientHeight - FHeaderHeight - (2 * FMargin);
@@ -468,17 +485,22 @@ begin
     Exit;
   end;
 
+  if not FVirtualFormValid and not FDraggingForm then
+    SyncVirtualFormPosition;
+
   FormW := Max(10, FTargetForm.Width);
   FormH := Max(10, FTargetForm.Height);
   FW := Max(4, Round(FormW * FScale));
   FH := Max(4, Round(FormH * FScale));
 
-  // Posição proporcional do Form na tela de 1080p
-  ScreenFormLeft := GetFormVirtualScreenLeft;
-  ScreenFormTop := GetFormVirtualScreenTop;
+  MaxL := Max(0, REF_SCREEN_WIDTH - FormW);
+  MaxT := Max(0, REF_SCREEN_HEIGHT - FormH);
+  FVirtualFormLeft := Max(0, Min(MaxL, FVirtualFormLeft));
+  FVirtualFormTop := Max(0, Min(MaxT, FVirtualFormTop));
 
-  FormL := FScreenRect.Left + Round(ScreenFormLeft * FScale);
-  FormT := FScreenRect.Top + Round(ScreenFormTop * FScale);
+  // Posição proporcional do Form na tela de 1080p
+  FormL := FScreenRect.Left + Round(FVirtualFormLeft * FScale);
+  FormT := FScreenRect.Top + Round(FVirtualFormTop * FScale);
 
   FFormRect := Rect(FormL, FormT, FormL + FW, FormT + FH);
 end;
@@ -659,14 +681,14 @@ begin
     if FSnappedCenterH and FSnappedCenterV then
       HeaderStr := Format('%s: [Centro 1080p]', [FTargetForm.Name])
     else
-      HeaderStr := Format('%s: X=%d, Y=%d', [FTargetForm.Name, FTargetForm.Left, FTargetForm.Top]);
+      HeaderStr := Format('%s: X=%d, Y=%d', [FTargetForm.Name, FVirtualFormLeft, FVirtualFormTop]);
   end
   else if FTargetForm <> nil then
   begin
     if FTargetForm.Position in [poScreenCenter, poDesktopCenter] then
       HeaderStr := Format('%s [%dx%d] (Centro)', [FTargetForm.Name, FTargetForm.Width, FTargetForm.Height])
     else
-      HeaderStr := Format('%s [%dx%d] (%d,%d)', [FTargetForm.Name, FTargetForm.Width, FTargetForm.Height, FTargetForm.Left, FTargetForm.Top]);
+      HeaderStr := Format('%s [%dx%d] (%d,%d)', [FTargetForm.Name, FTargetForm.Width, FTargetForm.Height, FVirtualFormLeft, FVirtualFormTop]);
   end
   else
     HeaderStr := 'Form Designer (1080p)';
@@ -721,7 +743,7 @@ begin
   if FDraggingForm and (FTargetForm <> nil) then
   begin
     Canvas.Font.Color := TColor($00D7FF);
-    Canvas.TextOut(FScreenRect.Left + 3, FScreenRect.Bottom - Canvas.TextHeight('X') - 1, Format('(%d, %d)', [FTargetForm.Left, FTargetForm.Top]));
+    Canvas.TextOut(FScreenRect.Left + 3, FScreenRect.Bottom - Canvas.TextHeight('X') - 1, Format('(%d, %d)', [FVirtualFormLeft, FVirtualFormTop]));
   end;
 
   if FTargetForm = nil then Exit;
@@ -874,8 +896,8 @@ begin
       FDraggingForm := True;
       MouseCapture := True;
       FFormDragStartMouse := Point(X, Y);
-      FFormDragStartLeft := GetFormVirtualScreenLeft;
-      FFormDragStartTop := GetFormVirtualScreenTop;
+      FFormDragStartLeft := FVirtualFormLeft;
+      FFormDragStartTop := FVirtualFormTop;
       FHasMovedForm := False;
       FSnappedCenterH := False;
       FSnappedCenterV := False;
@@ -884,13 +906,19 @@ begin
     end
     else if PtInRect(FScreenRect, Point(X, Y)) then
     begin
-      // Clicou na tela 1080p fora do form: seleciona o formulário no Object Inspector
-      if GlobalDesignHook <> nil then
-      begin
-        GlobalDesignHook.SelectOnlyThis(FTargetForm);
-        FSelectedComponent := FTargetForm;
-        Invalidate;
-      end;
+      // Clicou na tela 1080p fora do form: reposiciona o form para onde clicou e permite arrastar!
+      FVirtualFormLeft := Max(0, Min(REF_SCREEN_WIDTH - FTargetForm.Width,
+        Round((X - FScreenRect.Left) / FScale) - (FTargetForm.Width div 2)));
+      FVirtualFormTop := Max(0, Min(REF_SCREEN_HEIGHT - FTargetForm.Height,
+        Round((Y - FScreenRect.Top) / FScale) - (FTargetForm.Height div 2)));
+      CalculateMetrics;
+      FDraggingForm := True;
+      MouseCapture := True;
+      FFormDragStartMouse := Point(X, Y);
+      FFormDragStartLeft := FVirtualFormLeft;
+      FFormDragStartTop := FVirtualFormTop;
+      FHasMovedForm := True;
+      Invalidate;
       Exit;
     end;
   end;
@@ -969,8 +997,8 @@ begin
       NewLeft := Max(0, Min(MaxL, NewLeft));
       NewTop := Max(0, Min(MaxT, NewTop));
 
-      SetComponentLeftTopOrDesignInfo(FTargetForm, NewLeft, NewTop);
-      FTargetForm.Position := poDesigned;
+      FVirtualFormLeft := NewLeft;
+      FVirtualFormTop := NewTop;
       Invalidate;
     end;
     Exit;
@@ -993,7 +1021,7 @@ begin
       if FHoveredComponent <> nil then
         Hint := Format('%s: %s', [FHoveredComponent.Name, FHoveredComponent.ClassName])
       else if PtInRect(FFormRect, Point(X, Y)) then
-        Hint := Format('%s [Left: %d, Top: %d] - Arraste para mover na tela 1080p', [FTargetForm.Name, GetFormVirtualScreenLeft, GetFormVirtualScreenTop])
+        Hint := Format('%s [Left: %d, Top: %d] - Arraste para mover na tela 1080p', [FTargetForm.Name, FVirtualFormLeft, FVirtualFormTop])
       else
         Hint := '';
       Invalidate;
@@ -1023,7 +1051,7 @@ begin
     if FHasMovedForm and (FTargetForm <> nil) then
     begin
       // Aplica e notifica o Object Inspector / Designer do Lazarus
-      NotifyFormChanged;
+      CommitFormPosition;
       Invalidate;
     end
     else
