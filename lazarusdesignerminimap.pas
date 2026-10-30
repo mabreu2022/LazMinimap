@@ -293,7 +293,10 @@ begin
   // 2. Define as propriedades Left, Top e Position via RTTI
   TrySetOrdProp(FTargetForm, 'Left', FVirtualFormLeft);
   TrySetOrdProp(FTargetForm, 'Top', FVirtualFormTop);
-  FTargetForm.Position := poDesigned;
+  if FSnappedCenterH and FSnappedCenterV then
+    FTargetForm.Position := poScreenCenter
+  else
+    FTargetForm.Position := poDesigned;
 
   // 3. Notifica o Lazarus IDE Designer e Object Inspector
   NotifyFormChanged;
@@ -404,24 +407,28 @@ begin
     begin
       NewL := Margin;
       NewT := ParentH - Height - Margin;
+      Anchors := [akLeft, akBottom];
     end;
 
     mmcBottomRight:
     begin
       NewL := ParentW - Width - Margin;
       NewT := ParentH - Height - Margin;
+      Anchors := [akRight, akBottom];
     end;
 
     mmcTopLeft:
     begin
       NewL := Margin;
       NewT := Margin;
+      Anchors := [akLeft, akTop];
     end;
 
     mmcTopRight:
     begin
       NewL := ParentW - Width - Margin;
       NewT := Margin;
+      Anchors := [akRight, akTop];
     end;
 
     mmcFloating:
@@ -431,10 +438,8 @@ begin
     end;
   end;
 
-  Anchors := [akLeft, akTop];
   if (Left <> NewL) or (Top <> NewT) then
     SetBounds(NewL, NewT, Width, Height);
-  BringToFront;
 end;
 
 function TFormDesignerMiniMapControl.GetControlBoundsInForm(ACtrl: TControl): TRect;
@@ -514,7 +519,7 @@ var
   IsSel, IsHov: Boolean;
   ClassNm: string;
 begin
-  if (ACtrl = nil) or not ACtrl.Visible or (ADepth > 10) then Exit;
+  if (ACtrl = nil) or not ACtrl.Visible or (ADepth > 10) or (ACtrl = Self) then Exit;
 
   RInForm := GetControlBoundsInForm(ACtrl);
   ML := AFormOrigin.X + Round(RInForm.Left * FScale);
@@ -961,42 +966,42 @@ begin
     DeltaX := X - FFormDragStartMouse.X;
     DeltaY := Y - FFormDragStartMouse.Y;
 
-    if not FHasMovedForm and ((Abs(DeltaX) > 2) or (Abs(DeltaY) > 2)) then
+    ScreenDeltaX := Round(DeltaX / FScale);
+    ScreenDeltaY := Round(DeltaY / FScale);
+
+    NewLeft := FFormDragStartLeft + ScreenDeltaX;
+    NewTop := FFormDragStartTop + ScreenDeltaY;
+
+    MaxL := Max(0, REF_SCREEN_WIDTH - FTargetForm.Width);
+    MaxT := Max(0, REF_SCREEN_HEIGHT - FTargetForm.Height);
+
+    SnapThreshold := Max(15, Round(10 / FScale));
+
+    CenterL := MaxL div 2;
+    CenterT := MaxT div 2;
+
+    // Snap magnético aos cantos e bordas da tela
+    if Abs(NewLeft) < SnapThreshold then NewLeft := 0;
+    if Abs(NewTop) < SnapThreshold then NewTop := 0;
+    if Abs(NewLeft - MaxL) < SnapThreshold then NewLeft := MaxL;
+    if Abs(NewTop - MaxT) < SnapThreshold then NewTop := MaxT;
+
+    // Snap magnético ao centro da tela
+    FSnappedCenterH := (Abs(NewLeft - CenterL) < SnapThreshold);
+    if FSnappedCenterH then NewLeft := CenterL;
+
+    FSnappedCenterV := (Abs(NewTop - CenterT) < SnapThreshold);
+    if FSnappedCenterV then NewTop := CenterT;
+
+    // Limita dentro da tela 1080p
+    NewLeft := Max(0, Min(MaxL, NewLeft));
+    NewTop := Max(0, Min(MaxT, NewTop));
+
+    if (NewLeft <> FFormDragStartLeft) or (NewTop <> FFormDragStartTop) then
       FHasMovedForm := True;
 
-    if FHasMovedForm then
+    if (NewLeft <> FVirtualFormLeft) or (NewTop <> FVirtualFormTop) then
     begin
-      ScreenDeltaX := Round(DeltaX / FScale);
-      ScreenDeltaY := Round(DeltaY / FScale);
-
-      NewLeft := FFormDragStartLeft + ScreenDeltaX;
-      NewTop := FFormDragStartTop + ScreenDeltaY;
-
-      MaxL := Max(0, REF_SCREEN_WIDTH - FTargetForm.Width);
-      MaxT := Max(0, REF_SCREEN_HEIGHT - FTargetForm.Height);
-
-      SnapThreshold := Max(15, Round(10 / FScale));
-
-      CenterL := MaxL div 2;
-      CenterT := MaxT div 2;
-
-      // Snap magnético aos cantos e bordas da tela
-      if Abs(NewLeft) < SnapThreshold then NewLeft := 0;
-      if Abs(NewTop) < SnapThreshold then NewTop := 0;
-      if Abs(NewLeft - MaxL) < SnapThreshold then NewLeft := MaxL;
-      if Abs(NewTop - MaxT) < SnapThreshold then NewTop := MaxT;
-
-      // Snap magnético ao centro da tela
-      FSnappedCenterH := (Abs(NewLeft - CenterL) < SnapThreshold);
-      if FSnappedCenterH then NewLeft := CenterL;
-
-      FSnappedCenterV := (Abs(NewTop - CenterT) < SnapThreshold);
-      if FSnappedCenterV then NewTop := CenterT;
-
-      // Limita dentro da tela 1080p
-      NewLeft := Max(0, Min(MaxL, NewLeft));
-      NewTop := Max(0, Min(MaxT, NewTop));
-
       FVirtualFormLeft := NewLeft;
       FVirtualFormTop := NewTop;
       Invalidate;
@@ -1098,7 +1103,7 @@ begin
   end;
 
   FTimer := TTimer.Create(Self);
-  FTimer.Interval := 50; // 20 FPS para verificação de mudanças
+  FTimer.Interval := 150; // Intervalo suave sem sobrecarga de CPU
   FTimer.OnTimer := @OnTimer;
   FTimer.Enabled := True;
 end;
@@ -1248,7 +1253,15 @@ end;
 
 procedure TFormDesignerMiniMapManager.OnTimer(Sender: TObject);
 begin
-  if (FMiniMap <> nil) and FMiniMap.DraggingForm then Exit;
+  if FUpdating then Exit;
+  if (FMiniMap <> nil) and (FMiniMap.DraggingForm or FMiniMap.FDragging) then Exit;
+
+  // Se o usuário estiver arrastando/redimensionando com o mouse na IDE, não interfere
+  {$IFDEF WINDOWS}
+  if GetCapture <> 0 then Exit;
+  {$ENDIF}
+  if (Mouse <> nil) and (Mouse.Capture <> 0) then Exit;
+
   UpdatePositionAndState;
 end;
 
@@ -1277,9 +1290,7 @@ begin
       FMiniMap.Parent := DesignArea;
       FMiniMap.BringToFront;
       FMiniMap.UpdateDockPosition;
-    end
-    else if FMiniMap.Corner <> mmcFloating then
-      FMiniMap.UpdateDockPosition;
+    end;
 
     if FMiniMap.TargetForm <> DesignedForm then
       FMiniMap.TargetForm := DesignedForm;
@@ -1288,6 +1299,7 @@ begin
     begin
       FMiniMap.Visible := True;
       FMiniMap.BringToFront;
+      FMiniMap.UpdateDockPosition;
     end;
 
     // Redesenha apenas quando as propriedades do Form mudarem
@@ -1295,6 +1307,7 @@ begin
     if Sig <> FLastSignature then
     begin
       FLastSignature := Sig;
+      FMiniMap.FVirtualFormValid := False;
       FMiniMap.Invalidate;
     end;
   finally
