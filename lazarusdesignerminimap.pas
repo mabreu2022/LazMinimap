@@ -50,6 +50,15 @@ type
     FDragMouseStart: TPoint;
     FDragCtrlStart: TPoint;
 
+    // Arraste interativo do formulário dentro da tela 1080p
+    FDraggingForm: Boolean;
+    FFormDragStartMouse: TPoint;
+    FFormDragStartLeft: Integer;
+    FFormDragStartTop: Integer;
+    FHasMovedForm: Boolean;
+    FSnappedCenterH: Boolean;
+    FSnappedCenterV: Boolean;
+
     // Menu de contexto
     FPopupMenu: TPopupMenu;
     procedure SetTargetForm(AValue: TCustomForm);
@@ -58,12 +67,19 @@ type
     procedure SetCollapsed(AValue: Boolean);
     function GetControlBoundsInForm(ACtrl: TControl): TRect;
     function FindComponentAtMiniPos(AX, AY: Integer): TComponent;
+    function GetFormVirtualScreenLeft: Integer;
+    function GetFormVirtualScreenTop: Integer;
+    procedure NotifyFormChanged;
     procedure CalculateMetrics;
     procedure DrawControlRecursive(ACtrl: TControl; AFormOrigin: TPoint; ADepth: Integer = 0);
     procedure DrawNonVisualComponents(AFormOrigin: TPoint);
     procedure BuildPopupMenu;
     procedure OnMenuCornerClick(Sender: TObject);
     procedure OnMenuCollapseClick(Sender: TObject);
+    procedure OnMenuCenterFormClick(Sender: TObject);
+    procedure OnMenuTopLeftFormClick(Sender: TObject);
+    procedure OnMenuSetScreenCenterClick(Sender: TObject);
+    procedure OnMenuSetDesignedClick(Sender: TObject);
   protected
     procedure Paint; override;
     procedure MouseDown(Button: TMouseButton; Shift: TShiftState; X, Y: Integer); override;
@@ -78,6 +94,7 @@ type
     property SelectedComponent: TComponent read FSelectedComponent write SetSelectedComponent;
     property Corner: TMiniMapCorner read FCorner write SetCorner;
     property Collapsed: Boolean read FCollapsed write SetCollapsed;
+    property DraggingForm: Boolean read FDraggingForm;
   end;
 
   { TFormDesignerMiniMapManager: Gerencia posicionamento e visibilidade sem criar janelas popup }
@@ -177,7 +194,7 @@ begin
   FPopupMenu.Items.Add(Item);
 
   Item := TMenuItem.Create(FPopupMenu);
-  Item.Caption := 'Mover Livremente (Destacar)';
+  Item.Caption := 'Mover Livremente (Destacar Mini-mapa)';
   Item.Tag := Ord(mmcFloating);
   Item.OnClick := @OnMenuCornerClick;
   FPopupMenu.Items.Add(Item);
@@ -185,6 +202,30 @@ begin
   Item := TMenuItem.Create(FPopupMenu);
   Item.Caption := 'Recolher / Expandir Mini-mapa';
   Item.OnClick := @OnMenuCollapseClick;
+  FPopupMenu.Items.Add(Item);
+
+  Item := TMenuItem.Create(FPopupMenu);
+  Item.Caption := '-';
+  FPopupMenu.Items.Add(Item);
+
+  Item := TMenuItem.Create(FPopupMenu);
+  Item.Caption := 'Posicionar Formulário no Centro da Tela';
+  Item.OnClick := @OnMenuCenterFormClick;
+  FPopupMenu.Items.Add(Item);
+
+  Item := TMenuItem.Create(FPopupMenu);
+  Item.Caption := 'Posicionar no Canto Superior Esquerdo (0, 0)';
+  Item.OnClick := @OnMenuTopLeftFormClick;
+  FPopupMenu.Items.Add(Item);
+
+  Item := TMenuItem.Create(FPopupMenu);
+  Item.Caption := 'Modo de Execução: poScreenCenter (Centralizar ao Rodar)';
+  Item.OnClick := @OnMenuSetScreenCenterClick;
+  FPopupMenu.Items.Add(Item);
+
+  Item := TMenuItem.Create(FPopupMenu);
+  Item.Caption := 'Modo de Execução: poDesigned (Usar Coordenadas do Mini-mapa)';
+  Item.OnClick := @OnMenuSetDesignedClick;
   FPopupMenu.Items.Add(Item);
 
   PopupMenu := FPopupMenu;
@@ -199,6 +240,53 @@ end;
 procedure TFormDesignerMiniMapControl.OnMenuCollapseClick(Sender: TObject);
 begin
   Collapsed := not Collapsed;
+end;
+
+procedure TFormDesignerMiniMapControl.OnMenuCenterFormClick(Sender: TObject);
+begin
+  if FTargetForm = nil then Exit;
+  FTargetForm.Position := poDesigned;
+  FTargetForm.Left := Max(0, (REF_SCREEN_WIDTH - FTargetForm.Width) div 2);
+  FTargetForm.Top := Max(0, (REF_SCREEN_HEIGHT - FTargetForm.Height) div 2);
+  NotifyFormChanged;
+  Invalidate;
+end;
+
+procedure TFormDesignerMiniMapControl.OnMenuTopLeftFormClick(Sender: TObject);
+begin
+  if FTargetForm = nil then Exit;
+  FTargetForm.Position := poDesigned;
+  FTargetForm.Left := 0;
+  FTargetForm.Top := 0;
+  NotifyFormChanged;
+  Invalidate;
+end;
+
+procedure TFormDesignerMiniMapControl.OnMenuSetScreenCenterClick(Sender: TObject);
+begin
+  if FTargetForm = nil then Exit;
+  FTargetForm.Position := poScreenCenter;
+  NotifyFormChanged;
+  Invalidate;
+end;
+
+procedure TFormDesignerMiniMapControl.OnMenuSetDesignedClick(Sender: TObject);
+begin
+  if FTargetForm = nil then Exit;
+  FTargetForm.Position := poDesigned;
+  NotifyFormChanged;
+  Invalidate;
+end;
+
+procedure TFormDesignerMiniMapControl.NotifyFormChanged;
+begin
+  if (FTargetForm <> nil) and (GlobalDesignHook <> nil) then
+  begin
+    GlobalDesignHook.Modified(FTargetForm, 'Position');
+    GlobalDesignHook.Modified(FTargetForm, 'Left');
+    GlobalDesignHook.Modified(FTargetForm, 'Top');
+    GlobalDesignHook.RefreshPropertyValues;
+  end;
 end;
 
 procedure TFormDesignerMiniMapControl.SetTargetForm(AValue: TCustomForm);
@@ -320,12 +408,41 @@ begin
   Result := Bounds(L, T, ACtrl.Width, ACtrl.Height);
 end;
 
+function TFormDesignerMiniMapControl.GetFormVirtualScreenLeft: Integer;
+var
+  MaxL: Integer;
+begin
+  if FTargetForm = nil then Exit(0);
+  if FTargetForm.Position in [poScreenCenter, poDesktopCenter, poMainFormCenter, poOwnerFormCenter] then
+    Result := (REF_SCREEN_WIDTH - FTargetForm.Width) div 2
+  else
+    Result := FTargetForm.Left;
+
+  MaxL := Max(0, REF_SCREEN_WIDTH - FTargetForm.Width);
+  Result := Max(0, Min(MaxL, Result));
+end;
+
+function TFormDesignerMiniMapControl.GetFormVirtualScreenTop: Integer;
+var
+  MaxT: Integer;
+begin
+  if FTargetForm = nil then Exit(0);
+  if FTargetForm.Position in [poScreenCenter, poDesktopCenter, poMainFormCenter, poOwnerFormCenter] then
+    Result := (REF_SCREEN_HEIGHT - FTargetForm.Height) div 2
+  else
+    Result := FTargetForm.Top;
+
+  MaxT := Max(0, REF_SCREEN_HEIGHT - FTargetForm.Height);
+  Result := Max(0, Min(MaxT, Result));
+end;
+
 procedure TFormDesignerMiniMapControl.CalculateMetrics;
 var
   AvailW, AvailH: Integer;
   FormW, FormH: Integer;
   FormL, FormT: Integer;
   FW, FH: Integer;
+  ScreenFormLeft, ScreenFormTop: Integer;
 begin
   AvailW := ClientWidth - (2 * FMargin);
   AvailH := ClientHeight - FHeaderHeight - (2 * FMargin);
@@ -349,10 +466,12 @@ begin
   FW := Max(4, Round(FormW * FScale));
   FH := Max(4, Round(FormH * FScale));
 
-  // Posição do Form na tela de 1080p:
-  // Encostado no canto superior esquerdo (zero espaço vazio na esquerda!)
-  FormL := FScreenRect.Left + 2;
-  FormT := FScreenRect.Top + 2;
+  // Posição proporcional do Form na tela de 1080p
+  ScreenFormLeft := GetFormVirtualScreenLeft;
+  ScreenFormTop := GetFormVirtualScreenTop;
+
+  FormL := FScreenRect.Left + Round(ScreenFormLeft * FScale);
+  FormT := FScreenRect.Top + Round(ScreenFormTop * FScale);
 
   FFormRect := Rect(FormL, FormT, FormL + FW, FormT + FH);
 end;
@@ -491,7 +610,6 @@ procedure TFormDesignerMiniMapControl.Paint;
 var
   I: Integer;
   HeaderStr, ResStr, CornerTag: string;
-  PctW, PctH: Double;
   CenterX, CenterY: Integer;
 begin
   // Fundo externo da janela do Mini-mapa
@@ -529,11 +647,19 @@ begin
   Canvas.TextOut(ClientWidth - 36, 3, CornerTag);
 
   // Título e dimensões do formulário
-  if FTargetForm <> nil then
+  if FDraggingForm and (FTargetForm <> nil) then
   begin
-    PctW := (FTargetForm.Width / REF_SCREEN_WIDTH) * 100.0;
-    PctH := (FTargetForm.Height / REF_SCREEN_HEIGHT) * 100.0;
-    HeaderStr := Format('%s [%dx%d] (%d%%x%d%%)', [FTargetForm.Name, FTargetForm.Width, FTargetForm.Height, Round(PctW), Round(PctH)]);
+    if FSnappedCenterH and FSnappedCenterV then
+      HeaderStr := Format('%s: [Centro 1080p]', [FTargetForm.Name])
+    else
+      HeaderStr := Format('%s: X=%d, Y=%d', [FTargetForm.Name, FTargetForm.Left, FTargetForm.Top]);
+  end
+  else if FTargetForm <> nil then
+  begin
+    if FTargetForm.Position in [poScreenCenter, poDesktopCenter] then
+      HeaderStr := Format('%s [%dx%d] (Centro)', [FTargetForm.Name, FTargetForm.Width, FTargetForm.Height])
+    else
+      HeaderStr := Format('%s [%dx%d] (%d,%d)', [FTargetForm.Name, FTargetForm.Width, FTargetForm.Height, FTargetForm.Left, FTargetForm.Top]);
   end
   else
     HeaderStr := 'Form Designer (1080p)';
@@ -555,9 +681,28 @@ begin
   // Linhas guia de centro de tela
   CenterX := FScreenRect.Left + ((FScreenRect.Right - FScreenRect.Left) div 2);
   CenterY := FScreenRect.Top + ((FScreenRect.Bottom - FScreenRect.Top) div 2);
-  Canvas.Pen.Color := TColor($202226);
-  Canvas.Line(CenterX, FScreenRect.Top + 1, CenterX, FScreenRect.Bottom - 1);
-  Canvas.Line(FScreenRect.Left + 1, CenterY, FScreenRect.Right - 1, CenterY);
+
+  if FDraggingForm and FSnappedCenterH then
+  begin
+    Canvas.Pen.Color := TColor($00D7FF); // Guia de centro vertical destacada
+    Canvas.Line(CenterX, FScreenRect.Top + 1, CenterX, FScreenRect.Bottom - 1);
+  end
+  else
+  begin
+    Canvas.Pen.Color := TColor($202226);
+    Canvas.Line(CenterX, FScreenRect.Top + 1, CenterX, FScreenRect.Bottom - 1);
+  end;
+
+  if FDraggingForm and FSnappedCenterV then
+  begin
+    Canvas.Pen.Color := TColor($00D7FF); // Guia de centro horizontal destacada
+    Canvas.Line(FScreenRect.Left + 1, CenterY, FScreenRect.Right - 1, CenterY);
+  end
+  else
+  begin
+    Canvas.Pen.Color := TColor($202226);
+    Canvas.Line(FScreenRect.Left + 1, CenterY, FScreenRect.Right - 1, CenterY);
+  end;
 
   // Legenda 1080p
   Canvas.Font.Size := 6;
@@ -565,19 +710,38 @@ begin
   ResStr := '1080p';
   Canvas.TextOut(FScreenRect.Right - Canvas.TextWidth(ResStr) - 3, FScreenRect.Bottom - Canvas.TextHeight(ResStr) - 1, ResStr);
 
+  // Se estiver arrastando, mostra coordenadas no canto inferior esquerdo do monitor
+  if FDraggingForm and (FTargetForm <> nil) then
+  begin
+    Canvas.Font.Color := TColor($00D7FF);
+    Canvas.TextOut(FScreenRect.Left + 3, FScreenRect.Bottom - Canvas.TextHeight('X') - 1, Format('(%d, %d)', [FTargetForm.Left, FTargetForm.Top]));
+  end;
+
   if FTargetForm = nil then Exit;
 
   // 2. Desenha o Formulário proporcional na tela de 1080p
   Canvas.Brush.Style := bsSolid;
   Canvas.Brush.Color := TColor($2E3036);
-  Canvas.Pen.Color := TColor($585C66);
-  Canvas.Pen.Width := 1;
+  if FDraggingForm then
+  begin
+    Canvas.Pen.Color := TColor($00D7FF); // Realce ciano durante o arraste
+    Canvas.Pen.Width := 2;
+  end
+  else
+  begin
+    Canvas.Pen.Color := TColor($585C66);
+    Canvas.Pen.Width := 1;
+  end;
   Canvas.Rectangle(FFormRect);
+  Canvas.Pen.Width := 1;
 
   // Barra de título do formulário
   if (FFormRect.Bottom - FFormRect.Top) > 6 then
   begin
-    Canvas.Brush.Color := TColor($3E424C);
+    if FDraggingForm then
+      Canvas.Brush.Color := TColor($007ACC)
+    else
+      Canvas.Brush.Color := TColor($3E424C);
     Canvas.FillRect(Rect(FFormRect.Left + 1, FFormRect.Top + 1, FFormRect.Right - 1, FFormRect.Top + 3));
   end;
 
@@ -655,12 +819,10 @@ begin
 end;
 
 procedure TFormDesignerMiniMapControl.MouseDown(Button: TMouseButton; Shift: TShiftState; X, Y: Integer);
-var
-  TargetComp: TComponent;
 begin
   inherited MouseDown(Button, Shift, X, Y);
 
-  // Clique na barra de cabeçalho
+  // 1. Clique na barra de cabeçalho
   if Y <= FHeaderHeight then
   begin
     // Clique no botão de recolher '-' / '+'
@@ -683,7 +845,7 @@ begin
       Exit;
     end;
 
-    // Inicia o arraste livre do controle
+    // Inicia o arraste livre do controle do mini-mapa
     if Button = mbLeft then
     begin
       FDragging := True;
@@ -694,15 +856,33 @@ begin
     end;
   end;
 
-  // Clique no corpo do mini-mapa: seleção de componentes
+  // 2. Clique no corpo do mini-mapa (tela 1080p e formulário)
   if (Button = mbLeft) and (FTargetForm <> nil) and not FCollapsed then
   begin
-    TargetComp := FindComponentAtMiniPos(X, Y);
-    if (TargetComp <> nil) and (GlobalDesignHook <> nil) then
+    // Se clicou sobre o desenho do formulário: inicia o arraste do Form!
+    if PtInRect(FFormRect, Point(X, Y)) then
     begin
-      GlobalDesignHook.SelectOnlyThis(TargetComp);
-      FSelectedComponent := TargetComp;
+      FDraggingForm := True;
+      MouseCapture := True;
+      FFormDragStartMouse := Point(X, Y);
+      FFormDragStartLeft := GetFormVirtualScreenLeft;
+      FFormDragStartTop := GetFormVirtualScreenTop;
+      FHasMovedForm := False;
+      FSnappedCenterH := False;
+      FSnappedCenterV := False;
       Invalidate;
+      Exit;
+    end
+    else if PtInRect(FScreenRect, Point(X, Y)) then
+    begin
+      // Clicou na tela 1080p fora do form: seleciona o formulário no Object Inspector
+      if GlobalDesignHook <> nil then
+      begin
+        GlobalDesignHook.SelectOnlyThis(FTargetForm);
+        FSelectedComponent := FTargetForm;
+        Invalidate;
+      end;
+      Exit;
     end;
   end;
 end;
@@ -712,10 +892,15 @@ var
   CurScreen: TPoint;
   NewLeft, NewTop: Integer;
   HoverComp: TComponent;
+  DeltaX, DeltaY: Integer;
+  ScreenDeltaX, ScreenDeltaY: Integer;
+  MaxL, MaxT: Integer;
+  CenterL, CenterT: Integer;
+  SnapThreshold: Integer;
 begin
   inherited MouseMove(Shift, X, Y);
 
-  // Se estiver arrastando o controle pela barra de título
+  // 1. Se estiver arrastando o controle do mini-mapa pela barra de título
   if FDragging then
   begin
     CurScreen := ClientToScreen(Point(X, Y));
@@ -733,14 +918,75 @@ begin
     Exit;
   end;
 
+  // 2. Se estiver arrastando o formulário dentro da tela 1080p!
+  if FDraggingForm and (FTargetForm <> nil) and (FScale > 0) then
+  begin
+    DeltaX := X - FFormDragStartMouse.X;
+    DeltaY := Y - FFormDragStartMouse.Y;
+
+    if not FHasMovedForm and ((Abs(DeltaX) > 2) or (Abs(DeltaY) > 2)) then
+      FHasMovedForm := True;
+
+    if FHasMovedForm then
+    begin
+      ScreenDeltaX := Round(DeltaX / FScale);
+      ScreenDeltaY := Round(DeltaY / FScale);
+
+      NewLeft := FFormDragStartLeft + ScreenDeltaX;
+      NewTop := FFormDragStartTop + ScreenDeltaY;
+
+      MaxL := Max(0, REF_SCREEN_WIDTH - FTargetForm.Width);
+      MaxT := Max(0, REF_SCREEN_HEIGHT - FTargetForm.Height);
+
+      SnapThreshold := Max(15, Round(10 / FScale));
+
+      CenterL := MaxL div 2;
+      CenterT := MaxT div 2;
+
+      // Snap magnético aos cantos e bordas da tela
+      if Abs(NewLeft) < SnapThreshold then NewLeft := 0;
+      if Abs(NewTop) < SnapThreshold then NewTop := 0;
+      if Abs(NewLeft - MaxL) < SnapThreshold then NewLeft := MaxL;
+      if Abs(NewTop - MaxT) < SnapThreshold then NewTop := MaxT;
+
+      // Snap magnético ao centro da tela
+      FSnappedCenterH := (Abs(NewLeft - CenterL) < SnapThreshold);
+      if FSnappedCenterH then NewLeft := CenterL;
+
+      FSnappedCenterV := (Abs(NewTop - CenterT) < SnapThreshold);
+      if FSnappedCenterV then NewTop := CenterT;
+
+      // Limita dentro da tela 1080p
+      NewLeft := Max(0, Min(MaxL, NewLeft));
+      NewTop := Max(0, Min(MaxT, NewTop));
+
+      if (FTargetForm.Left <> NewLeft) or (FTargetForm.Top <> NewTop) or (FTargetForm.Position <> poDesigned) then
+      begin
+        FTargetForm.Position := poDesigned;
+        FTargetForm.Left := NewLeft;
+        FTargetForm.Top := NewTop;
+        Invalidate;
+      end;
+    end;
+    Exit;
+  end;
+
+  // 3. Hover, Cursores e Dicas
   if (FTargetForm <> nil) and not FCollapsed then
   begin
+    if PtInRect(FFormRect, Point(X, Y)) then
+      Cursor := crSizeAll
+    else
+      Cursor := crDefault;
+
     HoverComp := FindComponentAtMiniPos(X, Y);
     if HoverComp <> FHoveredComponent then
     begin
       FHoveredComponent := HoverComp;
       if FHoveredComponent <> nil then
         Hint := Format('%s: %s', [FHoveredComponent.Name, FHoveredComponent.ClassName])
+      else if PtInRect(FFormRect, Point(X, Y)) then
+        Hint := Format('%s [Left: %d, Top: %d] - Arraste para mover na tela 1080p', [FTargetForm.Name, FTargetForm.Left, FTargetForm.Top])
       else
         Hint := '';
       Invalidate;
@@ -749,12 +995,41 @@ begin
 end;
 
 procedure TFormDesignerMiniMapControl.MouseUp(Button: TMouseButton; Shift: TShiftState; X, Y: Integer);
+var
+  TargetComp: TComponent;
 begin
   inherited MouseUp(Button, Shift, X, Y);
+
   if FDragging then
   begin
     FDragging := False;
     MouseCapture := False;
+  end;
+
+  if FDraggingForm then
+  begin
+    FDraggingForm := False;
+    MouseCapture := False;
+    FSnappedCenterH := False;
+    FSnappedCenterV := False;
+
+    if FHasMovedForm and (FTargetForm <> nil) then
+    begin
+      // Aplica e notifica o Object Inspector / Designer do Lazarus
+      NotifyFormChanged;
+      Invalidate;
+    end
+    else
+    begin
+      // Foi apenas um clique (sem arrastar): seleciona o componente no IDE
+      TargetComp := FindComponentAtMiniPos(X, Y);
+      if (TargetComp <> nil) and (GlobalDesignHook <> nil) then
+      begin
+        GlobalDesignHook.SelectOnlyThis(TargetComp);
+        FSelectedComponent := TargetComp;
+        Invalidate;
+      end;
+    end;
   end;
 end;
 
@@ -766,6 +1041,8 @@ begin
     FHoveredComponent := nil;
     Invalidate;
   end;
+  if not FDraggingForm then
+    Cursor := crDefault;
 end;
 
 { TFormDesignerMiniMapManager }
@@ -895,6 +1172,7 @@ begin
     Result := (Result * 31 + AForm.Top) mod 1000000007;
     Result := (Result * 31 + AForm.Width) mod 1000000007;
     Result := (Result * 31 + AForm.Height) mod 1000000007;
+    Result := (Result * 31 + Ord(AForm.Position)) mod 1000000007;
     Result := (Result * 31 + AForm.ControlCount) mod 1000000007;
     Result := (Result * 31 + AForm.ComponentCount) mod 1000000007;
   end;
@@ -916,6 +1194,7 @@ end;
 
 procedure TFormDesignerMiniMapManager.OnTimer(Sender: TObject);
 begin
+  if (FMiniMap <> nil) and FMiniMap.DraggingForm then Exit;
   UpdatePositionAndState;
 end;
 
