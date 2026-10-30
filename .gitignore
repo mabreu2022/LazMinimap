@@ -1,0 +1,11 @@
+# Lazarus / Free Pascal ignore list
+lib/
+backup/
+*.ppu
+*.o
+*.a
+*.s
+*.compiled
+*.bak
+*.lps
+*~
