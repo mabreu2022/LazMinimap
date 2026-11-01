@@ -1,4 +1,4 @@
-﻿unit LazarusCodeMiniMap;
+unit LazarusCodeMiniMap;
 
 {$mode objfpc}{$H+}
 {$warn 5024 off : no warning about unused parameters}
@@ -10,8 +10,9 @@ uses
   LCLType, LCLIntf, SynEdit, SynEditTypes, SrcEditorIntf, IDEIntf;
 
 const
-  LEFT_MARGIN  = 6;
-  RIGHT_MARGIN = 6;
+  LEFT_MARGIN   = 6;
+  RIGHT_MARGIN  = 6;
+  HEADER_HEIGHT = 22;
 
 type
 
@@ -21,7 +22,9 @@ type
     zm1x,     // 1x Ultra Compacto (1px por linha)
     zm2x,     // 2x Normal (2px por linha - Padrão)
     zm3x,     // 3x Ampliado (3px por linha)
-    zm4x      // 4x Detalhado (4px por linha)
+    zm4x,     // 4x Detalhado (4px por linha)
+    zm6x,     // 6x Muito Ampliado (6px por linha - Micro-texto legível)
+    zm8x      // 8x Super Ampliado (8px por linha - Leitura direta)
   );
 
   { TCodeMiniMapRenderMode: Estilo de renderização do código }
@@ -37,6 +40,7 @@ type
     FZoom: TCodeMiniMapZoom;
     FRenderMode: TCodeMiniMapRenderMode;
     FBackColor: TColor;
+    FHeaderColor: TColor;
     FBorderColor: TColor;
     FViewportColor: TColor;
     FViewportHoverColor: TColor;
@@ -55,20 +59,26 @@ type
     FVHeight: Integer;
     FDragging: Boolean;
     FHoveringViewport: Boolean;
+    FHoverBtn: Integer; // 0=nenhum, 1=ZoomOut(-), 2=ZoomReset(Centro), 3=ZoomIn(+)
 
     // Menu de contexto
     FPopupMenu: TPopupMenu;
     procedure SetSynEdit(AValue: TCustomSynEdit);
     procedure SetZoom(AValue: TCodeMiniMapZoom);
     procedure SetRenderMode(AValue: TCodeMiniMapRenderMode);
+    function GetPitchForZoom(AZoom: TCodeMiniMapZoom; AAvailH, ATotalLines: Integer): Double;
+    function GetZoomLabel: string;
     procedure ScrollToY(AY: Integer);
     procedure BuildPopupMenu;
     procedure UpdatePopupMenuChecks;
     procedure OnMenuZoomClick(Sender: TObject);
+    procedure OnMenuZoomInClick(Sender: TObject);
+    procedure OnMenuZoomOutClick(Sender: TObject);
     procedure OnMenuRenderModeClick(Sender: TObject);
     procedure OnMenuWidthClick(Sender: TObject);
     procedure OnMenuToggleVisible(Sender: TObject);
     function IsPascalKeyword(const S: string): Boolean;
+    procedure DrawHeaderBar;
     procedure DrawLineMiniature(const S: string; LineY, MaxW: Integer; APitch: Double);
   protected
     procedure Paint; override;
@@ -130,21 +140,25 @@ begin
   // Zoom padrão: Normal (2px por linha)
   FZoom := zm2x;
   FRenderMode := rmSyntaxBlocks;
+  FHoverBtn := 0;
 
-  // Tema escuro moderno de alto contraste (estilo VSCode / Delphi)
-  FBackColor           := TColor($FFF4E8); // Azul bem clarinho (#E8F4FF)
-  FBorderColor         := TColor($E0C8B0); // Borda azul suave (#B0C8E0)
-  FViewportColor       := TColor($FFE4C8); // Destaque da viewport (#C8E4FF)
-  FViewportHoverColor  := TColor($FFD8B0); // Hover da viewport (#B0D8FF)
-  FViewportBorderColor := TColor($D89858); // Borda da viewport (#5898D8)
+  // Tema azul bem clarinho com efeito translúcido na Viewport (código visível por trás)
+  FBackColor           := TColor($FFF5EC); // Azul bem clarinho de fundo (#ECF5FF)
+  FHeaderColor         := TColor($FFE8D4); // Barra de zoom azul clara (#D4E8FF)
+  FBorderColor         := TColor($DEC4A8); // Borda azul suave (#A8C4DE)
+  FViewportColor       := TColor($FFE2C4); // Destaque azul claro da área visível (#C4E2FF)
+  FViewportHoverColor  := TColor($FFD4A8); // Destaque da viewport ao passar o mouse (#A8D4FF)
+  FViewportBorderColor := TColor($CC8038); // Borda nítida azul da viewport (#3880CC)
 
-  // Cores de sintaxe
-  FKeywordColor    := TColor($B04800); // Azul escuro (#0048B0)
-  FCommentColor    := TColor($388020); // Verde (#208038)
-  FStringColor     := TColor($1848A8); // Terracota (#A84818)
-  FDirectiveColor  := TColor($805070); // Roxo suave (#705080)
-  FTypeColor       := TColor($887800); // Teal escuro (#007888)
-  FIdentifierColor := TColor($684830); // Azul-ardósia (#304868)
+  // Cores de sintaxe com alto contraste sobre o fundo e sobre a barra azul da viewport
+  FKeywordColor    := TColor($A83800); // Azul marinho forte (#0038A8)
+  FCommentColor    := TColor($287818); // Verde (#187828)
+  FStringColor     := TColor($1040A0); // Terracota escuro (#A04010)
+  FDirectiveColor  := TColor($783868); // Roxo (#683878)
+  FTypeColor       := TColor($786800); // Teal escuro (#006878)
+  FIdentifierColor := TColor($503420); // Azul-ardósia escuro (#203450)
+
+  Hint := 'Mini-mapa: Use [+] e [-] no topo ou Ctrl+Roda do Mouse para Zoom';
 
   BuildPopupMenu;
 end;
@@ -155,18 +169,63 @@ begin
   inherited Destroy;
 end;
 
+function TCodeEditorMiniMapControl.GetPitchForZoom(AZoom: TCodeMiniMapZoom; AAvailH, ATotalLines: Integer): Double;
+begin
+  case AZoom of
+    zmFit: Result := Max(0.25, AAvailH / Max(1, ATotalLines));
+    zm1x:  Result := 1.0;
+    zm2x:  Result := 2.0;
+    zm3x:  Result := 3.0;
+    zm4x:  Result := 4.0;
+    zm6x:  Result := 6.0;
+    zm8x:  Result := 8.0;
+  else
+    Result := 2.0;
+  end;
+end;
+
+function TCodeEditorMiniMapControl.GetZoomLabel: string;
+begin
+  case FZoom of
+    zmFit: Result := 'Zoom: Fit';
+    zm1x:  Result := 'Zoom: 1x';
+    zm2x:  Result := 'Zoom: 2x';
+    zm3x:  Result := 'Zoom: 3x';
+    zm4x:  Result := 'Zoom: 4x';
+    zm6x:  Result := 'Zoom: 6x';
+    zm8x:  Result := 'Zoom: 8x';
+  else
+    Result := 'Zoom: 2x';
+  end;
+end;
+
 procedure TCodeEditorMiniMapControl.BuildPopupMenu;
 var
   Item, SubItem: TMenuItem;
 begin
   FPopupMenu := TPopupMenu.Create(Self);
 
+  // Ações rápidas de Zoom
+  Item := TMenuItem.Create(FPopupMenu);
+  Item.Caption := 'Aumentar Zoom (+)   [Ctrl + Roda p/ Cima]';
+  Item.OnClick := @OnMenuZoomInClick;
+  FPopupMenu.Items.Add(Item);
+
+  Item := TMenuItem.Create(FPopupMenu);
+  Item.Caption := 'Diminuir Zoom (-)   [Ctrl + Roda p/ Baixo]';
+  Item.OnClick := @OnMenuZoomOutClick;
+  FPopupMenu.Items.Add(Item);
+
+  Item := TMenuItem.Create(FPopupMenu);
+  Item.Caption := '-';
+  FPopupMenu.Items.Add(Item);
+
   // Submenu Zoom / Escala
   Item := TMenuItem.Create(FPopupMenu);
-  Item.Caption := 'Zoom / Escala (Ctrl + Roda do Mouse)';
+  Item.Caption := 'Nível de Zoom / Escala';
 
   SubItem := TMenuItem.Create(Item);
-  SubItem.Caption := 'Ajustar Todo o Código à Tela (Sem Zoom)';
+  SubItem.Caption := 'Ajustar Todo o Código à Tela (Fit / Sem Zoom)';
   SubItem.Tag := Ord(zmFit);
   SubItem.OnClick := @OnMenuZoomClick;
   Item.Add(SubItem);
@@ -192,6 +251,18 @@ begin
   SubItem := TMenuItem.Create(Item);
   SubItem.Caption := 'Zoom 4x - Detalhado (4px)';
   SubItem.Tag := Ord(zm4x);
+  SubItem.OnClick := @OnMenuZoomClick;
+  Item.Add(SubItem);
+
+  SubItem := TMenuItem.Create(Item);
+  SubItem.Caption := 'Zoom 6x - Muito Ampliado (6px - Micro-Texto)';
+  SubItem.Tag := Ord(zm6x);
+  SubItem.OnClick := @OnMenuZoomClick;
+  Item.Add(SubItem);
+
+  SubItem := TMenuItem.Create(Item);
+  SubItem.Caption := 'Zoom 8x - Super Ampliado (8px - Leitura)';
+  SubItem.Tag := Ord(zm8x);
   SubItem.OnClick := @OnMenuZoomClick;
   Item.Add(SubItem);
 
@@ -272,17 +343,17 @@ var
   ZoomMenu, RenderMenu, WidthMenu: TMenuItem;
   I: Integer;
 begin
-  if (FPopupMenu = nil) or (FPopupMenu.Items.Count < 4) then Exit;
+  if (FPopupMenu = nil) or (FPopupMenu.Items.Count < 7) then Exit;
 
-  ZoomMenu := FPopupMenu.Items[0];
+  ZoomMenu := FPopupMenu.Items[3];
   for I := 0 to ZoomMenu.Count - 1 do
     ZoomMenu.Items[I].Checked := (ZoomMenu.Items[I].Tag = Ord(FZoom));
 
-  RenderMenu := FPopupMenu.Items[1];
+  RenderMenu := FPopupMenu.Items[4];
   for I := 0 to RenderMenu.Count - 1 do
     RenderMenu.Items[I].Checked := (RenderMenu.Items[I].Tag = Ord(FRenderMode));
 
-  WidthMenu := FPopupMenu.Items[3];
+  WidthMenu := FPopupMenu.Items[6];
   for I := 0 to WidthMenu.Count - 1 do
     WidthMenu.Items[I].Checked := (WidthMenu.Items[I].Tag = Width);
 end;
@@ -291,6 +362,16 @@ procedure TCodeEditorMiniMapControl.OnMenuZoomClick(Sender: TObject);
 begin
   if Sender is TMenuItem then
     Zoom := TCodeMiniMapZoom(TMenuItem(Sender).Tag);
+end;
+
+procedure TCodeEditorMiniMapControl.OnMenuZoomInClick(Sender: TObject);
+begin
+  ZoomIn;
+end;
+
+procedure TCodeEditorMiniMapControl.OnMenuZoomOutClick(Sender: TObject);
+begin
+  ZoomOut;
 end;
 
 procedure TCodeEditorMiniMapControl.OnMenuRenderModeClick(Sender: TObject);
@@ -333,13 +414,15 @@ begin
     UpdatePopupMenuChecks;
 
     case FZoom of
-      zmFit: ZoomDesc := 'Ajustar Todo o Código (Sem Zoom)';
+      zmFit: ZoomDesc := 'Ajustar Todo o Código (Fit)';
       zm1x:  ZoomDesc := 'Zoom 1x (Ultra Compacto)';
       zm2x:  ZoomDesc := 'Zoom 2x (Normal)';
       zm3x:  ZoomDesc := 'Zoom 3x (Ampliado)';
       zm4x:  ZoomDesc := 'Zoom 4x (Detalhado)';
+      zm6x:  ZoomDesc := 'Zoom 6x (Muito Ampliado)';
+      zm8x:  ZoomDesc := 'Zoom 8x (Super Ampliado)';
     end;
-    Hint := Format('Mini-mapa: %s [Ctrl+Wheel para alterar]', [ZoomDesc]);
+    Hint := Format('Mini-mapa: %s | Botões [-]/[+] no topo ou Ctrl+Roda do Mouse', [ZoomDesc]);
 
     Invalidate;
   end;
@@ -362,7 +445,9 @@ begin
     zm1x:  Zoom := zm2x;
     zm2x:  Zoom := zm3x;
     zm3x:  Zoom := zm4x;
-    zm4x:  Exit;
+    zm4x:  Zoom := zm6x;
+    zm6x:  Zoom := zm8x;
+    zm8x:  Exit;
   end;
 end;
 
@@ -374,13 +459,15 @@ begin
     zm2x:  Zoom := zm1x;
     zm3x:  Zoom := zm2x;
     zm4x:  Zoom := zm3x;
+    zm6x:  Zoom := zm4x;
+    zm8x:  Zoom := zm6x;
   end;
 end;
 
 procedure TCodeEditorMiniMapControl.DblClick;
 begin
   inherited DblClick;
-  // Duplo-clique alterna rapidamente entre visão geral completa (Sem Zoom) e Normal
+  // Duplo-clique alterna rapidamente entre visão geral completa (Fit) e Normal (2x)
   if FZoom = zmFit then
     Zoom := zm2x
   else
@@ -407,6 +494,73 @@ begin
   Result := False;
 end;
 
+procedure TCodeEditorMiniMapControl.DrawHeaderBar;
+var
+  BtnMinusRect, BtnPlusRect, CenterRect: TRect;
+  Lbl: string;
+  TW, TH: Integer;
+begin
+  // Fundo da barra superior de Zoom
+  Canvas.Brush.Style := bsSolid;
+  Canvas.Brush.Color := FHeaderColor;
+  Canvas.FillRect(Rect(1, 0, ClientWidth, HEADER_HEIGHT));
+
+  // Linha inferior da barra superior
+  Canvas.Pen.Style := psSolid;
+  Canvas.Pen.Color := FBorderColor;
+  Canvas.Pen.Width := 1;
+  Canvas.Line(0, HEADER_HEIGHT - 1, ClientWidth, HEADER_HEIGHT - 1);
+
+  BtnMinusRect := Rect(3, 2, 23, HEADER_HEIGHT - 3);
+  BtnPlusRect  := Rect(ClientWidth - 23, 2, ClientWidth - 3, HEADER_HEIGHT - 3);
+  CenterRect   := Rect(25, 2, ClientWidth - 25, HEADER_HEIGHT - 3);
+
+  // Botão [-] (Zoom Out)
+  if FHoverBtn = 1 then
+    Canvas.Brush.Color := FViewportHoverColor
+  else
+    Canvas.Brush.Color := FBackColor;
+  Canvas.Pen.Color := FViewportBorderColor;
+  Canvas.RoundRect(BtnMinusRect.Left, BtnMinusRect.Top, BtnMinusRect.Right, BtnMinusRect.Bottom, 3, 3);
+
+  // Botão [+] (Zoom In)
+  if FHoverBtn = 3 then
+    Canvas.Brush.Color := FViewportHoverColor
+  else
+    Canvas.Brush.Color := FBackColor;
+  Canvas.Pen.Color := FViewportBorderColor;
+  Canvas.RoundRect(BtnPlusRect.Left, BtnPlusRect.Top, BtnPlusRect.Right, BtnPlusRect.Bottom, 3, 3);
+
+  // Textos dos botões e indicador central de Zoom
+  Canvas.Brush.Style := bsClear;
+  Canvas.Font.Name := 'Segoe UI';
+  Canvas.Font.Size := 8;
+  Canvas.Font.Style := [fsBold];
+  Canvas.Font.Color := TColor($683008);
+
+  TW := Canvas.TextWidth('-');
+  TH := Canvas.TextHeight('-');
+  Canvas.TextOut(BtnMinusRect.Left + ((BtnMinusRect.Right - BtnMinusRect.Left - TW) div 2),
+                 BtnMinusRect.Top + ((BtnMinusRect.Bottom - BtnMinusRect.Top - TH) div 2) - 1, '-');
+
+  TW := Canvas.TextWidth('+');
+  TH := Canvas.TextHeight('+');
+  Canvas.TextOut(BtnPlusRect.Left + ((BtnPlusRect.Right - BtnPlusRect.Left - TW) div 2),
+                 BtnPlusRect.Top + ((BtnPlusRect.Bottom - BtnPlusRect.Top - TH) div 2) - 1, '+');
+
+  // Indicador central (ex: "Zoom: 2x")
+  Canvas.Font.Size := 7;
+  if FHoverBtn = 2 then
+    Canvas.Font.Color := TColor($A83800)
+  else
+    Canvas.Font.Color := TColor($583820);
+  Lbl := GetZoomLabel;
+  TW := Canvas.TextWidth(Lbl);
+  TH := Canvas.TextHeight(Lbl);
+  Canvas.TextOut(CenterRect.Left + Max(0, (CenterRect.Right - CenterRect.Left - TW) div 2),
+                 CenterRect.Top + ((CenterRect.Bottom - CenterRect.Top - TH) div 2), Lbl);
+end;
+
 procedure TCodeEditorMiniMapControl.DrawLineMiniature(const S: string; LineY, MaxW: Integer; APitch: Double);
 var
   Len, I, WordStart: Integer;
@@ -416,22 +570,59 @@ var
   InString: Boolean;
   CurX: Integer;
   Ch: Char;
-  CharW: Integer;
+  CharW, BarThickness: Integer;
   UseMicroText: Boolean;
   TokenColor: TColor;
+
+  procedure DrawTokenBar(AX1, AX2: Integer; AColor: TColor);
+  var
+    B: Integer;
+  begin
+    Canvas.Pen.Color := AColor;
+    for B := 0 to BarThickness - 1 do
+      Canvas.Line(AX1, LineY + B, AX2, LineY + B);
+  end;
+
 begin
   Len := Length(S);
   if Len = 0 then Exit;
 
-  // Largura horizontal proporcional ao zoom
+  // Largura horizontal e espessura vertical proporcionais ao nível de Zoom
   if APitch < 1.8 then
-    CharW := 1
-  else if APitch >= 3.5 then
-    CharW := 3
-  else
+  begin
+    CharW := 1;
+    BarThickness := 1;
+  end
+  else if APitch < 3.0 then
+  begin
     CharW := 2;
+    BarThickness := 1;
+  end
+  else if APitch < 5.0 then
+  begin
+    CharW := 3;
+    BarThickness := 2;
+  end
+  else
+  begin
+    CharW := 4;
+    BarThickness := 3;
+  end;
 
-  UseMicroText := (FRenderMode = rmMicroText) and (APitch >= 3.0);
+  // Em zooms altos (6x e 8x) ou quando rmMicroText estiver ativo (>= 3x), renderiza micro-texto legível
+  UseMicroText := ((FRenderMode = rmMicroText) and (APitch >= 3.0)) or (APitch >= 5.5);
+  if UseMicroText then
+  begin
+    Canvas.Font.Name := 'Consolas';
+    if APitch >= 7.5 then
+      Canvas.Font.Size := 6
+    else if APitch >= 5.5 then
+      Canvas.Font.Size := 5
+    else
+      Canvas.Font.Size := 4;
+    Canvas.Font.Style := [];
+    Canvas.Brush.Style := bsClear;
+  end;
 
   // Calcula indentação inicial
   Indent := 0;
@@ -452,8 +643,13 @@ begin
   begin
     X1 := CurX;
     X2 := Min(MaxW, X1 + (Len - Indent) * CharW);
-    Canvas.Pen.Color := FCommentColor;
-    Canvas.Line(X1, LineY, X2, LineY);
+    if UseMicroText then
+    begin
+      Canvas.Font.Color := FCommentColor;
+      Canvas.TextOut(X1, LineY - 1, Copy(S, Indent + 1, Len - Indent));
+    end
+    else
+      DrawTokenBar(X1, X2, FCommentColor);
     Exit;
   end;
 
@@ -462,8 +658,13 @@ begin
   begin
     X1 := CurX;
     X2 := Min(MaxW, X1 + (Len - Indent) * CharW);
-    Canvas.Pen.Color := FDirectiveColor;
-    Canvas.Line(X1, LineY, X2, LineY);
+    if UseMicroText then
+    begin
+      Canvas.Font.Color := FDirectiveColor;
+      Canvas.TextOut(X1, LineY - 1, Copy(S, Indent + 1, Len - Indent));
+    end
+    else
+      DrawTokenBar(X1, X2, FDirectiveColor);
     Exit;
   end;
 
@@ -477,8 +678,7 @@ begin
     if Ch = '''' then
     begin
       InString := not InString;
-      Canvas.Pen.Color := FStringColor;
-      Canvas.Line(CurX, LineY, Min(MaxW, CurX + 3), LineY);
+      DrawTokenBar(CurX, Min(MaxW, CurX + 3), FStringColor);
       Inc(CurX, CharW + 2);
       Inc(I);
       Continue;
@@ -486,8 +686,7 @@ begin
 
     if InString then
     begin
-      Canvas.Pen.Color := FStringColor;
-      Canvas.Line(CurX, LineY, Min(MaxW, CurX + 2), LineY);
+      DrawTokenBar(CurX, Min(MaxW, CurX + 2), FStringColor);
       Inc(CurX, CharW);
       Inc(I);
       Continue;
@@ -496,8 +695,7 @@ begin
     if (Ch = '/') and (I < Len) and (S[I + 1] = '/') then
     begin
       // Restante da linha é comentário
-      Canvas.Pen.Color := FCommentColor;
-      Canvas.Line(CurX, LineY, Min(MaxW, CurX + (Len - I + 1) * CharW), LineY);
+      DrawTokenBar(CurX, Min(MaxW, CurX + (Len - I + 1) * CharW), FCommentColor);
       Break;
     end;
 
@@ -521,13 +719,12 @@ begin
       if UseMicroText then
       begin
         Canvas.Font.Color := TokenColor;
-        Canvas.TextOut(X1, LineY - 2, WordStr);
+        Canvas.TextOut(X1, LineY - 1, WordStr);
         CurX := CurX + Canvas.TextWidth(WordStr) + 2;
       end
       else
       begin
-        Canvas.Pen.Color := TokenColor;
-        Canvas.Line(X1, LineY, X2, LineY);
+        DrawTokenBar(X1, X2, TokenColor);
         CurX := X2 + CharW;
       end;
     end
@@ -535,8 +732,7 @@ begin
     begin
       if not (Ch in [' ', #9]) then
       begin
-        Canvas.Pen.Color := FIdentifierColor;
-        Canvas.Line(CurX, LineY, Min(MaxW, CurX + CharW), LineY);
+        DrawTokenBar(CurX, Min(MaxW, CurX + CharW), FIdentifierColor);
         Inc(CurX, CharW + 1);
       end
       else
@@ -548,7 +744,7 @@ end;
 
 procedure TCodeEditorMiniMapControl.Paint;
 var
-  H, TotalLines, LinesInWindow, MaxTopLine: Integer;
+  AvailH, TotalLines, LinesInWindow, MaxTopLine: Integer;
   Pitch: Double;
   TotalContentH, MaxScroll, ScrollOffsetY: Integer;
   TopLine: Integer;
@@ -557,7 +753,7 @@ var
   VRect: TRect;
   LineStr: string;
 begin
-  // Fundo principal
+  // 1. Fundo principal azul bem clarinho
   Canvas.Brush.Style := bsSolid;
   Canvas.Brush.Color := FBackColor;
   Canvas.FillRect(ClientRect);
@@ -568,90 +764,64 @@ begin
   Canvas.Pen.Width := 1;
   Canvas.Line(0, 0, 0, ClientHeight);
 
+  // Desenha a barra de controles de Zoom no topo ([-], Zoom, [+])
+  DrawHeaderBar;
+
   if (FSynEdit = nil) or (FSynEdit.Lines = nil) then Exit;
 
   TotalLines := FSynEdit.Lines.Count;
   if TotalLines <= 0 then Exit;
 
-  H := ClientHeight;
+  AvailH := Max(10, ClientHeight - HEADER_HEIGHT);
   LinesInWindow := Max(1, FSynEdit.LinesInWindow);
   TopLine := Max(1, FSynEdit.TopLine);
   MaxTopLine := Max(1, TotalLines - LinesInWindow + 1);
   MaxW := ClientWidth - RIGHT_MARGIN;
 
-  if (FRenderMode = rmMicroText) then
-  begin
-    Canvas.Font.Name := 'Arial';
-    Canvas.Font.Size := 3;
-    Canvas.Brush.Style := bsClear;
-  end;
+  Pitch := GetPitchForZoom(FZoom, AvailH, TotalLines);
 
-  // 1. Determina o Pitch e limites de acordo com o nível de Zoom
-  case FZoom of
-    zmFit:
+  // 2. Calcula posição da Viewport e intervalo de linhas visíveis
+  if FZoom = zmFit then
+  begin
+    ScrollOffsetY := 0;
+    FirstLine := 1;
+    LastLine := TotalLines;
+
+    FVTop := HEADER_HEIGHT + Round((TopLine - 1) * Pitch);
+    FVHeight := Max(14, Round(LinesInWindow * Pitch));
+    FVHeight := Min(ClientHeight - FVTop, FVHeight);
+  end
+  else
+  begin
+    TotalContentH := Round(TotalLines * Pitch);
+
+    if TotalContentH <= AvailH then
     begin
-      // SEM ZOOM: Ajusta o documento inteiro na altura da janela
-      Pitch := H / Max(1, TotalLines);
       ScrollOffsetY := 0;
       FirstLine := 1;
       LastLine := TotalLines;
-
-      FVTop := Round((TopLine - 1) * Pitch);
-      FVHeight := Max(14, Round(LinesInWindow * Pitch));
-      FVHeight := Min(H - FVTop, FVHeight);
-    end;
-
-    zm1x, zm2x, zm3x, zm4x:
+      FVTop := HEADER_HEIGHT + Round((TopLine - 1) * Pitch);
+      FVHeight := Max(16, Round(LinesInWindow * Pitch));
+      FVHeight := Min(ClientHeight - FVTop, FVHeight);
+    end
+    else
     begin
-      case FZoom of
-        zm1x: Pitch := 1.0;
-        zm2x: Pitch := 2.0;
-        zm3x: Pitch := 3.0;
-        zm4x: Pitch := 4.0;
-      else
-        Pitch := 2.0;
-      end;
+      MaxScroll := TotalContentH - AvailH;
+      Progress := (TopLine - 1) / Max(1, MaxTopLine - 1);
+      Progress := Max(0.0, Min(1.0, Progress));
 
-      TotalContentH := Round(TotalLines * Pitch);
+      ScrollOffsetY := Round(Progress * MaxScroll);
+      FirstLine := Max(1, Round(ScrollOffsetY / Pitch) + 1);
+      LastLine := Min(TotalLines, FirstLine + Round(AvailH / Pitch) + 2);
 
-      if TotalContentH <= H then
-      begin
-        ScrollOffsetY := 0;
-        FirstLine := 1;
-        LastLine := TotalLines;
-        FVTop := Round((TopLine - 1) * Pitch);
-        FVHeight := Max(16, Round(LinesInWindow * Pitch));
-      end
-      else
-      begin
-        MaxScroll := TotalContentH - H;
-        Progress := (TopLine - 1) / Max(1, MaxTopLine - 1);
-        Progress := Max(0.0, Min(1.0, Progress));
-
-        ScrollOffsetY := Round(Progress * MaxScroll);
-        FirstLine := Max(1, Round(ScrollOffsetY / Pitch) + 1);
-        LastLine := Min(TotalLines, FirstLine + Round(H / Pitch) + 2);
-
-        FVHeight := Max(20, Round(H * (LinesInWindow / TotalLines)));
-        FVHeight := Min(H, FVHeight);
-        FVTop := Round(Progress * (H - FVHeight));
-      end;
+      FVHeight := Max(20, Round(AvailH * (LinesInWindow / TotalLines)));
+      FVHeight := Min(AvailH, FVHeight);
+      FVTop := HEADER_HEIGHT + Round(Progress * (AvailH - FVHeight));
     end;
   end;
 
-  // 2. Renderiza as linhas de código visíveis na área do minimapa
-  Canvas.Pen.Width := 1;
-  for L := FirstLine to LastLine do
-  begin
-    LineY := Round((L - 1) * Pitch) - ScrollOffsetY;
-    if (LineY >= 0) and (LineY < H) then
-    begin
-      LineStr := FSynEdit.Lines[L - 1];
-      DrawLineMiniature(LineStr, LineY, MaxW, Pitch);
-    end;
-  end;
-
-  // 3. Renderiza o retângulo translúcido da Viewport (área visível no editor)
+  // 3. PRIMEIRO desenha o preenchimento azul claro da Viewport (ao fundo),
+  //    para que o bloco de código fique 100% visível por cima (efeito transparente)!
   VRect := Rect(1, FVTop, ClientWidth - 1, FVTop + FVHeight);
 
   Canvas.Brush.Style := bsSolid;
@@ -659,18 +829,38 @@ begin
     Canvas.Brush.Color := FViewportHoverColor
   else
     Canvas.Brush.Color := FViewportColor;
-
   Canvas.FillRect(VRect);
 
+  // Barra lateral esquerda de destaque da Viewport (3px)
+  Canvas.Brush.Color := FViewportBorderColor;
+  Canvas.FillRect(Rect(1, FVTop, 4, FVTop + FVHeight));
+
+  // 4. SEGUNDO: Renderiza as linhas de código POR CIMA da barra azul da Viewport!
+  Canvas.Pen.Width := 1;
+  for L := FirstLine to LastLine do
+  begin
+    LineY := HEADER_HEIGHT + Round((L - 1) * Pitch) - ScrollOffsetY;
+    if (LineY >= HEADER_HEIGHT) and (LineY < ClientHeight - 1) then
+    begin
+      LineStr := FSynEdit.Lines[L - 1];
+      DrawLineMiniature(LineStr, LineY, MaxW, Pitch);
+    end;
+  end;
+
+  // 5. TERCEIRO: Desenha APENAS o contorno (bsClear) da Viewport por cima, sem tapar o código!
+  Canvas.Brush.Style := bsClear;
   Canvas.Pen.Style := psSolid;
   Canvas.Pen.Color := FViewportBorderColor;
   Canvas.Pen.Width := 1;
   Canvas.Rectangle(VRect);
+
+  // Re-desenha o cabeçalho caso alguma linha no limite tenha tocado o topo
+  DrawHeaderBar;
 end;
 
 procedure TCodeEditorMiniMapControl.ScrollToY(AY: Integer);
 var
-  H, TotalLines, LinesInWindow, MaxTopLine: Integer;
+  AvailH, RelY, TotalLines, LinesInWindow, MaxTopLine: Integer;
   Pitch: Double;
   TotalContentH, VHeight: Integer;
   Progress: Double;
@@ -681,46 +871,35 @@ begin
   TotalLines := FSynEdit.Lines.Count;
   if TotalLines <= 0 then Exit;
 
-  H := ClientHeight;
+  AvailH := Max(10, ClientHeight - HEADER_HEIGHT);
+  RelY := Max(0, AY - HEADER_HEIGHT);
   LinesInWindow := Max(1, FSynEdit.LinesInWindow);
   MaxTopLine := Max(1, TotalLines - LinesInWindow + 1);
+  Pitch := GetPitchForZoom(FZoom, AvailH, TotalLines);
 
-  case FZoom of
-    zmFit:
+  if FZoom = zmFit then
+  begin
+    VHeight := Max(14, Round(LinesInWindow * Pitch));
+    VHeight := Min(AvailH, VHeight);
+    Progress := (RelY - (VHeight div 2)) / Max(1, AvailH - VHeight);
+    Progress := Max(0.0, Min(1.0, Progress));
+    TargetTopLine := 1 + Round(Progress * (MaxTopLine - 1));
+  end
+  else
+  begin
+    TotalContentH := Round(TotalLines * Pitch);
+
+    if TotalContentH <= AvailH then
     begin
-      Pitch := H / Max(1, TotalLines);
-      VHeight := Max(14, Round(LinesInWindow * Pitch));
-      VHeight := Min(H, VHeight);
-      Progress := (AY - (VHeight div 2)) / Max(1, H - VHeight);
+      TargetTopLine := 1 + Round(RelY / Pitch) - (LinesInWindow div 2);
+    end
+    else
+    begin
+      VHeight := Max(20, Round(AvailH * (LinesInWindow / TotalLines)));
+      VHeight := Min(AvailH, VHeight);
+      Progress := (RelY - (VHeight div 2)) / Max(1, AvailH - VHeight);
       Progress := Max(0.0, Min(1.0, Progress));
       TargetTopLine := 1 + Round(Progress * (MaxTopLine - 1));
-    end;
-
-    zm1x, zm2x, zm3x, zm4x:
-    begin
-      case FZoom of
-        zm1x: Pitch := 1.0;
-        zm2x: Pitch := 2.0;
-        zm3x: Pitch := 3.0;
-        zm4x: Pitch := 4.0;
-      else
-        Pitch := 2.0;
-      end;
-
-      TotalContentH := Round(TotalLines * Pitch);
-
-      if TotalContentH <= H then
-      begin
-        TargetTopLine := 1 + Round(AY / Pitch) - (LinesInWindow div 2);
-      end
-      else
-      begin
-        VHeight := Max(20, Round(H * (LinesInWindow / TotalLines)));
-        VHeight := Min(H, VHeight);
-        Progress := (AY - (VHeight div 2)) / Max(1, H - VHeight);
-        Progress := Max(0.0, Min(1.0, Progress));
-        TargetTopLine := 1 + Round(Progress * (MaxTopLine - 1));
-      end;
     end;
   end;
 
@@ -737,6 +916,24 @@ begin
   inherited MouseDown(Button, Shift, X, Y);
   if Button = mbLeft then
   begin
+    // Cliques na barra superior de Zoom ([-], Zoom: Nx, [+])
+    if Y < HEADER_HEIGHT then
+    begin
+      if X <= 24 then
+        ZoomOut
+      else if X >= ClientWidth - 24 then
+        ZoomIn
+      else
+      begin
+        // Clique no centro alterna entre Fit (código todo) e 2x (Padrão)
+        if FZoom = zmFit then
+          Zoom := zm2x
+        else
+          Zoom := zmFit;
+      end;
+      Exit;
+    end;
+
     FDragging := True;
     MouseCapture := True;
     ScrollToY(Y);
@@ -750,6 +947,7 @@ end;
 procedure TCodeEditorMiniMapControl.MouseMove(Shift: TShiftState; X, Y: Integer);
 var
   IsOverV: Boolean;
+  NewHoverBtn: Integer;
 begin
   inherited MouseMove(Shift, X, Y);
 
@@ -759,10 +957,22 @@ begin
     Exit;
   end;
 
-  IsOverV := (Y >= FVTop) and (Y <= FVTop + FVHeight);
-  if IsOverV <> FHoveringViewport then
+  NewHoverBtn := 0;
+  if Y < HEADER_HEIGHT then
+  begin
+    if X <= 24 then
+      NewHoverBtn := 1
+    else if X >= ClientWidth - 24 then
+      NewHoverBtn := 3
+    else
+      NewHoverBtn := 2;
+  end;
+
+  IsOverV := (Y >= HEADER_HEIGHT) and (Y >= FVTop) and (Y <= FVTop + FVHeight);
+  if (IsOverV <> FHoveringViewport) or (NewHoverBtn <> FHoverBtn) then
   begin
     FHoveringViewport := IsOverV;
+    FHoverBtn := NewHoverBtn;
     Invalidate;
   end;
 end;
@@ -781,9 +991,10 @@ end;
 procedure TCodeEditorMiniMapControl.MouseLeave;
 begin
   inherited MouseLeave;
-  if FHoveringViewport then
+  if FHoveringViewport or (FHoverBtn <> 0) then
   begin
     FHoveringViewport := False;
+    FHoverBtn := 0;
     Invalidate;
   end;
 end;
@@ -794,8 +1005,8 @@ var
 begin
   Result := inherited DoMouseWheel(Shift, WheelDelta, MousePos);
 
-  // Ctrl + Wheel: Ajusta o Zoom instantaneamente!
-  if ssCtrl in Shift then
+  // Ctrl + Wheel (ou rolar com o mouse sobre a barra de Zoom no topo): Ajusta o Zoom instantaneamente!
+  if (ssCtrl in Shift) or (MousePos.Y < HEADER_HEIGHT) then
   begin
     if WheelDelta > 0 then
       ZoomIn
