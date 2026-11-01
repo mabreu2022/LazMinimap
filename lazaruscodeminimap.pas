@@ -1,4 +1,4 @@
-unit LazarusCodeMiniMap;
+﻿unit LazarusCodeMiniMap;
 
 {$mode objfpc}{$H+}
 {$warn 5024 off : no warning about unused parameters}
@@ -132,19 +132,19 @@ begin
   FRenderMode := rmSyntaxBlocks;
 
   // Tema escuro moderno de alto contraste (estilo VSCode / Delphi)
-  FBackColor           := TColor($1E1E1E);
-  FBorderColor         := TColor($2D2D2D);
-  FViewportColor       := TColor($33363B);
-  FViewportHoverColor  := TColor($42464D);
-  FViewportBorderColor := TColor($585D66);
+  FBackColor           := TColor($FFF4E8); // Azul bem clarinho (#E8F4FF)
+  FBorderColor         := TColor($E0C8B0); // Borda azul suave (#B0C8E0)
+  FViewportColor       := TColor($FFE4C8); // Destaque da viewport (#C8E4FF)
+  FViewportHoverColor  := TColor($FFD8B0); // Hover da viewport (#B0D8FF)
+  FViewportBorderColor := TColor($D89858); // Borda da viewport (#5898D8)
 
   // Cores de sintaxe
-  FKeywordColor    := TColor($569CD6); // Azul
-  FCommentColor    := TColor($6A9955); // Verde
-  FStringColor     := TColor($CE9178); // Laranja claro
-  FDirectiveColor  := TColor($9E9E9E); // Cinza médio
-  FTypeColor       := TColor($4EC9B0); // Verde água (Teal)
-  FIdentifierColor := TColor($CCCCCC); // Texto claro
+  FKeywordColor    := TColor($B04800); // Azul escuro (#0048B0)
+  FCommentColor    := TColor($388020); // Verde (#208038)
+  FStringColor     := TColor($1848A8); // Terracota (#A84818)
+  FDirectiveColor  := TColor($805070); // Roxo suave (#705080)
+  FTypeColor       := TColor($887800); // Teal escuro (#007888)
+  FIdentifierColor := TColor($684830); // Azul-ardósia (#304868)
 
   BuildPopupMenu;
 end;

@@ -1,4 +1,4 @@
-unit LazarusDesignerMiniMap;
+﻿unit LazarusDesignerMiniMap;
 
 {$mode objfpc}{$H+}
 {$warn 5024 off : no warning about unused parameters}
@@ -143,11 +143,11 @@ begin
   FCollapsed := False;
 
   // Cores do tema escuro moderno
-  FBackColor := TColor($1E1E1E);
-  FHeaderColor := TColor($2A2A2A);
-  FBorderColor := TColor($3E3E3E);
-  FScreenColor := TColor($121214); // Monitor 1080p
-  FSelectionColor := TColor($00A2E8);
+  FBackColor := TColor($FFF4E8); // Azul bem clarinho (#E8F4FF)
+  FHeaderColor := TColor($FFE6CE); // Cabeçalho azul claro (#CEE6FF)
+  FBorderColor := TColor($D8B490); // Borda azul suave (#90B4D8)
+  FScreenColor := TColor($FFF8F0); // Monitor 1080p azul bem clarinho (#F0F8FF)
+  FSelectionColor := TColor($D05000); // Realce azul forte (#0050D0)
 
   DoubleBuffered := True;
   Cursor := crDefault;
@@ -539,41 +539,41 @@ begin
   if (ACtrl is TCustomPanel) or (Pos('Panel', ClassNm) > 0) or (Pos('GroupBox', ClassNm) > 0) then
   begin
     Canvas.Brush.Style := bsSolid;
-    Canvas.Brush.Color := TColor($2A2B30);
-    Canvas.Pen.Color := TColor($42444C);
+    Canvas.Brush.Color := TColor($FFF2E4);
+    Canvas.Pen.Color := TColor($C89868);
     Canvas.Rectangle(CRect);
   end
   else if (ACtrl is TCustomButton) or (Pos('Button', ClassNm) > 0) then
   begin
     Canvas.Brush.Style := bsSolid;
-    Canvas.Brush.Color := TColor($3A4452);
-    Canvas.Pen.Color := TColor($58657A);
+    Canvas.Brush.Color := TColor($F8D8B8);
+    Canvas.Pen.Color := TColor($B07840);
     Canvas.RoundRect(CRect.Left, CRect.Top, CRect.Right, CRect.Bottom, 2, 2);
   end
   else if (ACtrl is TCustomEdit) or (Pos('Edit', ClassNm) > 0) or (Pos('Memo', ClassNm) > 0) then
   begin
     Canvas.Brush.Style := bsSolid;
-    Canvas.Brush.Color := TColor($18191B);
-    Canvas.Pen.Color := TColor($484B52);
+    Canvas.Brush.Color := TColor($FFFFFF);
+    Canvas.Pen.Color := TColor($B89068);
     Canvas.Rectangle(CRect);
   end
   else if (ACtrl is TCustomLabel) or (Pos('Label', ClassNm) > 0) then
   begin
-    Canvas.Pen.Color := TColor($9AA0A6);
+    Canvas.Pen.Color := TColor($704820);
     Canvas.Line(CRect.Left, CRect.Top + (MH div 2), Min(CRect.Right, CRect.Left + Max(3, MW - 1)), CRect.Top + (MH div 2));
   end
   else if (Pos('Grid', ClassNm) > 0) or (Pos('List', ClassNm) > 0) or (Pos('Tree', ClassNm) > 0) then
   begin
     Canvas.Brush.Style := bsSolid;
-    Canvas.Brush.Color := TColor($202226);
-    Canvas.Pen.Color := TColor($3D414A);
+    Canvas.Brush.Color := TColor($FFFDF9);
+    Canvas.Pen.Color := TColor($C09870);
     Canvas.Rectangle(CRect);
   end
   else
   begin
     Canvas.Brush.Style := bsSolid;
-    Canvas.Brush.Color := TColor($25282E);
-    Canvas.Pen.Color := TColor($444852);
+    Canvas.Brush.Color := TColor($FCEADB);
+    Canvas.Pen.Color := TColor($B88858);
     Canvas.Rectangle(CRect);
   end;
 
@@ -670,7 +670,7 @@ begin
 
   // Botão de recolher/expandir no canto direito da barra de título
   Canvas.Font.Size := 7;
-  Canvas.Font.Color := TColor($AAAAAA);
+  Canvas.Font.Color := TColor($683818);
   Canvas.Brush.Style := bsClear;
   if FCollapsed then
     Canvas.TextOut(ClientWidth - 16, 3, '+')
@@ -708,7 +708,7 @@ begin
   // 1. Desenha a Tela de 1080p (Monitor Full HD)
   Canvas.Brush.Style := bsSolid;
   Canvas.Brush.Color := FScreenColor;
-  Canvas.Pen.Color := TColor($3A3C42);
+  Canvas.Pen.Color := TColor($D8B898);
   Canvas.Pen.Width := 1;
   Canvas.Rectangle(FScreenRect);
 
@@ -723,7 +723,7 @@ begin
   end
   else
   begin
-    Canvas.Pen.Color := TColor($202226);
+    Canvas.Pen.Color := TColor($F0DEC8);
     Canvas.Line(CenterX, FScreenRect.Top + 1, CenterX, FScreenRect.Bottom - 1);
   end;
 
@@ -734,13 +734,13 @@ begin
   end
   else
   begin
-    Canvas.Pen.Color := TColor($202226);
+    Canvas.Pen.Color := TColor($F0DEC8);
     Canvas.Line(FScreenRect.Left + 1, CenterY, FScreenRect.Right - 1, CenterY);
   end;
 
   // Legenda 1080p
   Canvas.Font.Size := 6;
-  Canvas.Font.Color := TColor($555A66);
+  Canvas.Font.Color := TColor($A07850);
   ResStr := '1080p';
   Canvas.TextOut(FScreenRect.Right - Canvas.TextWidth(ResStr) - 3, FScreenRect.Bottom - Canvas.TextHeight(ResStr) - 1, ResStr);
 
@@ -755,7 +755,7 @@ begin
 
   // 2. Desenha o Formulário proporcional na tela de 1080p
   Canvas.Brush.Style := bsSolid;
-  Canvas.Brush.Color := TColor($2E3036);
+  Canvas.Brush.Color := TColor($FFE8D0);
   if FDraggingForm then
   begin
     Canvas.Pen.Color := TColor($00D7FF); // Realce ciano durante o arraste
@@ -763,7 +763,7 @@ begin
   end
   else
   begin
-    Canvas.Pen.Color := TColor($585C66);
+    Canvas.Pen.Color := TColor($B88048);
     Canvas.Pen.Width := 1;
   end;
   Canvas.Rectangle(FFormRect);
@@ -775,7 +775,7 @@ begin
     if FDraggingForm then
       Canvas.Brush.Color := TColor($007ACC)
     else
-      Canvas.Brush.Color := TColor($3E424C);
+      Canvas.Brush.Color := TColor($D88838);
     Canvas.FillRect(Rect(FFormRect.Left + 1, FFormRect.Top + 1, FFormRect.Right - 1, FFormRect.Top + 3));
   end;
 
