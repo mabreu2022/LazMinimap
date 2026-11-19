@@ -7,7 +7,8 @@ interface
 
 uses
   Classes, SysUtils, Types, Math, Controls, Graphics, Forms, ExtCtrls, Menus,
-  LCLType, LCLIntf, SynEdit, SynEditTypes, SrcEditorIntf, IDEIntf;
+  LCLType, LCLIntf, SynEdit, SynEditTypes, SrcEditorIntf, IDEIntf,
+  SynEditHighlighter, SynHighlighterPas, LazIDEIntf, Laz2_XMLCfg, MenuIntf;
 
 const
   LEFT_MARGIN   = 6;
@@ -33,20 +34,21 @@ type
     rmMicroText     // Micro-texto legível (mini font)
   );
 
-  { TCodeEditorMiniMapControl: Renderiza a miniatura do código com controle de zoom e viewport }
+  { TCodeEditorMiniMapControl: Renders code miniature with zoom and viewport controls }
   TCodeEditorMiniMapControl = class(TCustomControl)
   private
     FSynEdit: TCustomSynEdit;
     FZoom: TCodeMiniMapZoom;
     FRenderMode: TCodeMiniMapRenderMode;
     FBackColor: TColor;
+    FTextColor: TColor;
     FHeaderColor: TColor;
     FBorderColor: TColor;
     FViewportColor: TColor;
     FViewportHoverColor: TColor;
     FViewportBorderColor: TColor;
 
-    // Cores de sintaxe do código no minimapa
+    // Syntax colors from current color scheme
     FKeywordColor: TColor;
     FCommentColor: TColor;
     FStringColor: TColor;
@@ -54,14 +56,20 @@ type
     FTypeColor: TColor;
     FIdentifierColor: TColor;
 
-    // Viewport metrics calculadas em Paint
+    // State tracking to detect color scheme changes
+    FLastSynEditColor: TColor;
+    FLastSynEditFontColor: TColor;
+    FLastHighlighter: TObject;
+
+    // Viewport metrics calculated in Paint
     FVTop: Integer;
     FVHeight: Integer;
+    FDragOffsetY: Integer;
     FDragging: Boolean;
     FHoveringViewport: Boolean;
-    FHoverBtn: Integer; // 0=nenhum, 1=ZoomOut(-), 2=ZoomReset(Centro), 3=ZoomIn(+)
+    FHoverBtn: Integer; // 0=none, 1=ZoomOut(-), 2=ZoomReset(Center), 3=ZoomIn(+)
 
-    // Menu de contexto
+    // Context menu
     FPopupMenu: TPopupMenu;
     procedure SetSynEdit(AValue: TCustomSynEdit);
     procedure SetZoom(AValue: TCodeMiniMapZoom);
@@ -80,6 +88,8 @@ type
     function IsPascalKeyword(const S: string): Boolean;
     procedure DrawHeaderBar;
     procedure DrawLineMiniature(const S: string; LineY, MaxW: Integer; APitch: Double);
+    procedure LoadSettings;
+    procedure SaveSettings;
   protected
     procedure Paint; override;
     procedure MouseDown(Button: TMouseButton; Shift: TShiftState; X, Y: Integer); override;
@@ -91,11 +101,14 @@ type
   public
     constructor Create(AOwner: TComponent); override;
     destructor Destroy; override;
+    procedure UpdateColorsFromEditor;
     procedure ZoomIn;
     procedure ZoomOut;
     property TargetSynEdit: TCustomSynEdit read FSynEdit write SetSynEdit;
     property Zoom: TCodeMiniMapZoom read FZoom write SetZoom;
     property RenderMode: TCodeMiniMapRenderMode read FRenderMode write SetRenderMode;
+    property BackColor: TColor read FBackColor;
+    property TextColor: TColor read FTextColor;
   end;
 
   { TCodeEditorMiniMapManager: Monitora abas do editor e acopla o minimapa à direita do TSynEdit }
@@ -105,9 +118,13 @@ type
     FHookedSynEdit: TCustomSynEdit;
     FTimer: TTimer;
     FUpdating: Boolean;
+    FEnabled: Boolean;
     FLastTopLine: Integer;
     FLastLineCount: Integer;
     FLastLinesInWindow: Integer;
+    procedure SetMiniMapEnabled(AValue: Boolean);
+    procedure LoadSettings;
+    procedure SaveSettings;
     procedure OnEditorChange(Sender: TObject);
     procedure OnSynStatusChange(Sender: TObject; Changes: TSynStatusChanges);
     procedure OnTimer(Sender: TObject);
@@ -117,7 +134,9 @@ type
   public
     constructor Create(AOwner: TComponent); override;
     destructor Destroy; override;
+    procedure ToggleMiniMap(Sender: TObject);
     property MiniMap: TCodeEditorMiniMapControl read FMiniMap;
+    property MiniMapEnabled: Boolean read FEnabled write SetMiniMapEnabled;
   end;
 
 procedure Register;
@@ -127,7 +146,235 @@ implementation
 var
   CodeMiniMapGlobal: TCodeEditorMiniMapManager = nil;
 
+function GetMiniMapConfigFile: string;
+var
+  Dir: string;
+begin
+  if LazarusIDE <> nil then
+    Dir := LazarusIDE.GetPrimaryConfigPath
+  else
+    Dir := GetAppConfigDir(False);
+  if Dir = '' then
+    Dir := '.';
+  Result := IncludeTrailingPathDelimiter(Dir) + 'lazminimap.xml';
+end;
+
+function ResolveColor(AColor, ADefault: TColor): TColor;
+begin
+  if (AColor = clNone) or (AColor = clDefault) then
+    Result := ColorToRGB(ADefault)
+  else
+    Result := ColorToRGB(AColor);
+end;
+
+function IsDarkColor(AColor: TColor): Boolean;
+var
+  C: LongWord;
+  R, G, B: Integer;
+begin
+  C := ColorToRGB(AColor);
+  R := C and $FF;
+  G := (C shr 8) and $FF;
+  B := (C shr 16) and $FF;
+  Result := ((R * 77 + G * 150 + B * 29) shr 8) < 128;
+end;
+
+function BlendColors(Col1, Col2: TColor; Factor: Double): TColor;
+var
+  C1, C2: LongWord;
+  R1, G1, B1, R2, G2, B2: Integer;
+  R, G, B: Integer;
+begin
+  C1 := ColorToRGB(Col1);
+  C2 := ColorToRGB(Col2);
+  Factor := Max(0.0, Min(1.0, Factor));
+  R1 := C1 and $FF;
+  G1 := (C1 shr 8) and $FF;
+  B1 := (C1 shr 16) and $FF;
+  R2 := C2 and $FF;
+  G2 := (C2 shr 8) and $FF;
+  B2 := (C2 shr 16) and $FF;
+  R := Round(R1 * (1.0 - Factor) + R2 * Factor);
+  G := Round(G1 * (1.0 - Factor) + G2 * Factor);
+  B := Round(B1 * (1.0 - Factor) + B2 * Factor);
+  Result := RGB(Byte(R), Byte(G), Byte(B));
+end;
+
 { TCodeEditorMiniMapControl }
+
+procedure TCodeEditorMiniMapControl.UpdateColorsFromEditor;
+var
+  PasHl: TSynPasSyn;
+  Attr: TSynHighlighterAttributes;
+  AttrName: string;
+  I: Integer;
+  IsDark: Boolean;
+  SelBg: TColor;
+  CurEditor: TSourceEditorInterface;
+  ActiveSyn: TCustomSynEdit;
+begin
+  SelBg := clNone;
+
+  // 1. Read background and foreground text colors from current Lazarus color scheme
+  if FSynEdit <> nil then
+  begin
+    FBackColor := ResolveColor(FSynEdit.Color, clWhite);
+    FTextColor := ResolveColor(FSynEdit.Font.Color, clBlack);
+    if (FSynEdit.SelectedColor <> nil) and
+       (FSynEdit.SelectedColor.Background <> clNone) and
+       (FSynEdit.SelectedColor.Background <> clDefault) then
+      SelBg := ColorToRGB(FSynEdit.SelectedColor.Background);
+  end
+  else
+  begin
+    // Fallback: try active editor from SourceEditorManagerIntf if available
+    ActiveSyn := nil;
+    if SourceEditorManagerIntf <> nil then
+    begin
+      CurEditor := SourceEditorManagerIntf.ActiveEditor;
+      if (CurEditor <> nil) and (CurEditor.EditorControl is TCustomSynEdit) then
+        ActiveSyn := TCustomSynEdit(CurEditor.EditorControl);
+    end;
+
+    if ActiveSyn <> nil then
+    begin
+      FBackColor := ResolveColor(ActiveSyn.Color, clWhite);
+      FTextColor := ResolveColor(ActiveSyn.Font.Color, clBlack);
+      if (ActiveSyn.SelectedColor <> nil) and
+         (ActiveSyn.SelectedColor.Background <> clNone) and
+         (ActiveSyn.SelectedColor.Background <> clDefault) then
+        SelBg := ColorToRGB(ActiveSyn.SelectedColor.Background);
+    end
+    else
+    begin
+      FBackColor := ResolveColor(clWindow, clWhite);
+      FTextColor := ResolveColor(clWindowText, clBlack);
+    end;
+  end;
+
+  IsDark := IsDarkColor(FBackColor);
+
+  // Ensure readable contrast between text and background
+  if FTextColor = FBackColor then
+  begin
+    if IsDark then
+      FTextColor := clWhite
+    else
+      FTextColor := clBlack;
+  end;
+
+  // 2. Default syntax colors according to dark or light scheme
+  if IsDark then
+  begin
+    FKeywordColor    := TColor($569CD6); // Blue
+    FCommentColor    := TColor($6A9955); // Green
+    FStringColor     := TColor($CE9178); // Salmon / Orange
+    FDirectiveColor  := TColor($9E9E9E); // Medium Gray
+    FTypeColor       := TColor($4EC9B0); // Teal
+    FIdentifierColor := FTextColor;
+  end
+  else
+  begin
+    FKeywordColor    := TColor($A83800); // Navy / Deep Blue ($0038A8)
+    FCommentColor    := TColor($287818); // Dark Green ($187828)
+    FStringColor     := TColor($1040A0); // Dark Terracotta ($A04010)
+    FDirectiveColor  := TColor($783868); // Purple ($683878)
+    FTypeColor       := TColor($786800); // Dark Teal ($006878)
+    FIdentifierColor := FTextColor;
+  end;
+
+  // 3. Read specific syntax colors from the active highlighter in current scheme
+  if (FSynEdit <> nil) and (FSynEdit.Highlighter <> nil) then
+  begin
+    if (FSynEdit.Highlighter.KeywordAttribute <> nil) and
+       (FSynEdit.Highlighter.KeywordAttribute.Foreground <> clNone) and
+       (FSynEdit.Highlighter.KeywordAttribute.Foreground <> clDefault) then
+      FKeywordColor := ColorToRGB(FSynEdit.Highlighter.KeywordAttribute.Foreground);
+
+    if (FSynEdit.Highlighter.CommentAttribute <> nil) and
+       (FSynEdit.Highlighter.CommentAttribute.Foreground <> clNone) and
+       (FSynEdit.Highlighter.CommentAttribute.Foreground <> clDefault) then
+      FCommentColor := ColorToRGB(FSynEdit.Highlighter.CommentAttribute.Foreground);
+
+    if (FSynEdit.Highlighter.StringAttribute <> nil) and
+       (FSynEdit.Highlighter.StringAttribute.Foreground <> clNone) and
+       (FSynEdit.Highlighter.StringAttribute.Foreground <> clDefault) then
+      FStringColor := ColorToRGB(FSynEdit.Highlighter.StringAttribute.Foreground);
+
+    if (FSynEdit.Highlighter.IdentifierAttribute <> nil) and
+       (FSynEdit.Highlighter.IdentifierAttribute.Foreground <> clNone) and
+       (FSynEdit.Highlighter.IdentifierAttribute.Foreground <> clDefault) then
+      FIdentifierColor := ColorToRGB(FSynEdit.Highlighter.IdentifierAttribute.Foreground);
+
+    if FSynEdit.Highlighter is TSynPasSyn then
+    begin
+      PasHl := TSynPasSyn(FSynEdit.Highlighter);
+      if (PasHl.DirectiveAttri <> nil) and
+         (PasHl.DirectiveAttri.Foreground <> clNone) and
+         (PasHl.DirectiveAttri.Foreground <> clDefault) then
+        FDirectiveColor := ColorToRGB(PasHl.DirectiveAttri.Foreground);
+    end;
+
+    for I := 0 to FSynEdit.Highlighter.AttrCount - 1 do
+    begin
+      Attr := FSynEdit.Highlighter.Attribute[I];
+      if (Attr = nil) or (Attr.Foreground = clNone) or (Attr.Foreground = clDefault) then
+        Continue;
+      AttrName := LowerCase(Attr.StoredName);
+      if AttrName = '' then
+        AttrName := LowerCase(Attr.Name);
+      if Pos('directive', AttrName) > 0 then
+        FDirectiveColor := ColorToRGB(Attr.Foreground)
+      else if (Pos('type', AttrName) > 0) or (Pos('symbol', AttrName) > 0) then
+        FTypeColor := ColorToRGB(Attr.Foreground);
+    end;
+  end;
+
+  // 4. Derive UI chrome colors (header, borders, viewport) harmoniously
+  if IsDark then
+  begin
+    FHeaderColor := BlendColors(FBackColor, clWhite, 0.07);
+    FBorderColor := BlendColors(FBackColor, clWhite, 0.16);
+
+    if SelBg <> clNone then
+    begin
+      FViewportColor       := BlendColors(FBackColor, SelBg, 0.35);
+      FViewportHoverColor  := BlendColors(FBackColor, SelBg, 0.55);
+      FViewportBorderColor := BlendColors(SelBg, clWhite, 0.30);
+    end
+    else
+    begin
+      FViewportColor       := BlendColors(FBackColor, clWhite, 0.12);
+      FViewportHoverColor  := BlendColors(FBackColor, clWhite, 0.22);
+      FViewportBorderColor := BlendColors(FBackColor, clWhite, 0.40);
+    end;
+  end
+  else
+  begin
+    FHeaderColor := BlendColors(FBackColor, clBlack, 0.05);
+    FBorderColor := BlendColors(FBackColor, clBlack, 0.16);
+
+    if SelBg <> clNone then
+    begin
+      FViewportColor       := BlendColors(FBackColor, SelBg, 0.28);
+      FViewportHoverColor  := BlendColors(FBackColor, SelBg, 0.45);
+      FViewportBorderColor := BlendColors(SelBg, clBlack, 0.25);
+    end
+    else
+    begin
+      FViewportColor       := BlendColors(FBackColor, clBlack, 0.08);
+      FViewportHoverColor  := BlendColors(FBackColor, clBlack, 0.16);
+      FViewportBorderColor := BlendColors(FBackColor, clBlack, 0.35);
+    end;
+  end;
+
+  if FSynEdit <> nil then
+  begin
+    FLastSynEditColor := FSynEdit.Color;
+    FLastSynEditFontColor := FSynEdit.Font.Color;
+    FLastHighlighter := FSynEdit.Highlighter;
+  end;
+end;
 
 constructor TCodeEditorMiniMapControl.Create(AOwner: TComponent);
 begin
@@ -137,30 +384,24 @@ begin
   Cursor := crHandPoint;
   ShowHint := True;
 
-  // Zoom padrão: Normal (2px por linha)
+  // Default Zoom: Normal (2px per line)
   FZoom := zm2x;
   FRenderMode := rmSyntaxBlocks;
   FHoverBtn := 0;
+  FDragOffsetY := 0;
 
-  // Tema azul bem clarinho com efeito translúcido na Viewport (código visível por trás)
-  FBackColor           := TColor($FFF5EC); // Azul bem clarinho de fundo (#ECF5FF)
-  FHeaderColor         := TColor($FFE8D4); // Barra de zoom azul clara (#D4E8FF)
-  FBorderColor         := TColor($DEC4A8); // Borda azul suave (#A8C4DE)
-  FViewportColor       := TColor($FFE2C4); // Destaque azul claro da área visível (#C4E2FF)
-  FViewportHoverColor  := TColor($FFD4A8); // Destaque da viewport ao passar o mouse (#A8D4FF)
-  FViewportBorderColor := TColor($CC8038); // Borda nítida azul da viewport (#3880CC)
+  FLastSynEditColor := clNone;
+  FLastSynEditFontColor := clNone;
+  FLastHighlighter := nil;
 
-  // Cores de sintaxe com alto contraste sobre o fundo e sobre a barra azul da viewport
-  FKeywordColor    := TColor($A83800); // Azul marinho forte (#0038A8)
-  FCommentColor    := TColor($287818); // Verde (#187828)
-  FStringColor     := TColor($1040A0); // Terracota escuro (#A04010)
-  FDirectiveColor  := TColor($783868); // Roxo (#683878)
-  FTypeColor       := TColor($786800); // Teal escuro (#006878)
-  FIdentifierColor := TColor($503420); // Azul-ardósia escuro (#203450)
+  // Load colors from current Lazarus color scheme
+  UpdateColorsFromEditor;
 
-  Hint := 'Mini-mapa: Use [+] e [-] no topo ou Ctrl+Roda do Mouse para Zoom';
+  Hint := 'Minimap: Use [+] and [-] at the top or Ctrl+Mouse Wheel to Zoom';
 
   BuildPopupMenu;
+  LoadSettings;
+  UpdatePopupMenuChecks;
 end;
 
 destructor TCodeEditorMiniMapControl.Destroy;
@@ -169,10 +410,51 @@ begin
   inherited Destroy;
 end;
 
+procedure TCodeEditorMiniMapControl.LoadSettings;
+var
+  Cfg: TXMLConfig;
+  FileName: string;
+begin
+  try
+    FileName := GetMiniMapConfigFile;
+    if not FileExists(FileName) then Exit;
+    Cfg := TXMLConfig.Create(FileName);
+    try
+      FZoom := TCodeMiniMapZoom(Cfg.GetValue('CodeMiniMap/Zoom/Value', Ord(zm2x)));
+      FRenderMode := TCodeMiniMapRenderMode(Cfg.GetValue('CodeMiniMap/RenderMode/Value', Ord(rmSyntaxBlocks)));
+      Width := Cfg.GetValue('CodeMiniMap/Width/Value', 110);
+    finally
+      Cfg.Free;
+    end;
+  except
+  end;
+end;
+
+procedure TCodeEditorMiniMapControl.SaveSettings;
+var
+  Cfg: TXMLConfig;
+  FileName: string;
+begin
+  try
+    FileName := GetMiniMapConfigFile;
+    ForceDirectories(ExtractFilePath(FileName));
+    Cfg := TXMLConfig.Create(FileName);
+    try
+      Cfg.SetValue('CodeMiniMap/Zoom/Value', Ord(FZoom));
+      Cfg.SetValue('CodeMiniMap/RenderMode/Value', Ord(FRenderMode));
+      Cfg.SetValue('CodeMiniMap/Width/Value', Width);
+      Cfg.Flush;
+    finally
+      Cfg.Free;
+    end;
+  except
+  end;
+end;
+
 function TCodeEditorMiniMapControl.GetPitchForZoom(AZoom: TCodeMiniMapZoom; AAvailH, ATotalLines: Integer): Double;
 begin
   case AZoom of
-    zmFit: Result := Max(0.25, AAvailH / Max(1, ATotalLines));
+    zmFit: Result := Min(8.0, Max(0.25, AAvailH / Max(1, ATotalLines)));
     zm1x:  Result := 1.0;
     zm2x:  Result := 2.0;
     zm3x:  Result := 3.0;
@@ -205,14 +487,14 @@ var
 begin
   FPopupMenu := TPopupMenu.Create(Self);
 
-  // Ações rápidas de Zoom
+  // Quick Zoom actions
   Item := TMenuItem.Create(FPopupMenu);
-  Item.Caption := 'Aumentar Zoom (+)   [Ctrl + Roda p/ Cima]';
+  Item.Caption := 'Zoom In (+)   [Ctrl + Wheel Up]';
   Item.OnClick := @OnMenuZoomInClick;
   FPopupMenu.Items.Add(Item);
 
   Item := TMenuItem.Create(FPopupMenu);
-  Item.Caption := 'Diminuir Zoom (-)   [Ctrl + Roda p/ Baixo]';
+  Item.Caption := 'Zoom Out (-)   [Ctrl + Wheel Down]';
   Item.OnClick := @OnMenuZoomOutClick;
   FPopupMenu.Items.Add(Item);
 
@@ -220,66 +502,66 @@ begin
   Item.Caption := '-';
   FPopupMenu.Items.Add(Item);
 
-  // Submenu Zoom / Escala
+  // Submenu Zoom / Scale
   Item := TMenuItem.Create(FPopupMenu);
-  Item.Caption := 'Nível de Zoom / Escala';
+  Item.Caption := 'Zoom Level / Scale';
 
   SubItem := TMenuItem.Create(Item);
-  SubItem.Caption := 'Ajustar Todo o Código à Tela (Fit / Sem Zoom)';
+  SubItem.Caption := 'Fit All Code to Screen (Fit / No Zoom)';
   SubItem.Tag := Ord(zmFit);
   SubItem.OnClick := @OnMenuZoomClick;
   Item.Add(SubItem);
 
   SubItem := TMenuItem.Create(Item);
-  SubItem.Caption := 'Zoom 1x - Ultra Compacto (1px)';
+  SubItem.Caption := 'Zoom 1x - Ultra Compact (1px)';
   SubItem.Tag := Ord(zm1x);
   SubItem.OnClick := @OnMenuZoomClick;
   Item.Add(SubItem);
 
   SubItem := TMenuItem.Create(Item);
-  SubItem.Caption := 'Zoom 2x - Normal (2px - Padrão)';
+  SubItem.Caption := 'Zoom 2x - Normal (2px - Default)';
   SubItem.Tag := Ord(zm2x);
   SubItem.OnClick := @OnMenuZoomClick;
   Item.Add(SubItem);
 
   SubItem := TMenuItem.Create(Item);
-  SubItem.Caption := 'Zoom 3x - Ampliado (3px)';
+  SubItem.Caption := 'Zoom 3x - Enlarged (3px)';
   SubItem.Tag := Ord(zm3x);
   SubItem.OnClick := @OnMenuZoomClick;
   Item.Add(SubItem);
 
   SubItem := TMenuItem.Create(Item);
-  SubItem.Caption := 'Zoom 4x - Detalhado (4px)';
+  SubItem.Caption := 'Zoom 4x - Detailed (4px)';
   SubItem.Tag := Ord(zm4x);
   SubItem.OnClick := @OnMenuZoomClick;
   Item.Add(SubItem);
 
   SubItem := TMenuItem.Create(Item);
-  SubItem.Caption := 'Zoom 6x - Muito Ampliado (6px - Micro-Texto)';
+  SubItem.Caption := 'Zoom 6x - Very Large (6px - Micro-Text)';
   SubItem.Tag := Ord(zm6x);
   SubItem.OnClick := @OnMenuZoomClick;
   Item.Add(SubItem);
 
   SubItem := TMenuItem.Create(Item);
-  SubItem.Caption := 'Zoom 8x - Super Ampliado (8px - Leitura)';
+  SubItem.Caption := 'Zoom 8x - Extra Large (8px - Reading)';
   SubItem.Tag := Ord(zm8x);
   SubItem.OnClick := @OnMenuZoomClick;
   Item.Add(SubItem);
 
   FPopupMenu.Items.Add(Item);
 
-  // Submenu Estilo de Renderização
+  // Submenu Visual Style
   Item := TMenuItem.Create(FPopupMenu);
-  Item.Caption := 'Estilo Visual';
+  Item.Caption := 'Visual Style';
 
   SubItem := TMenuItem.Create(Item);
-  SubItem.Caption := 'Barras de Sintaxe (Rápido e Limpo)';
+  SubItem.Caption := 'Syntax Bars (Fast and Clean)';
   SubItem.Tag := Ord(rmSyntaxBlocks);
   SubItem.OnClick := @OnMenuRenderModeClick;
   Item.Add(SubItem);
 
   SubItem := TMenuItem.Create(Item);
-  SubItem.Caption := 'Micro-Texto Legível (Mini Font)';
+  SubItem.Caption := 'Readable Micro-Text (Mini Font)';
   SubItem.Tag := Ord(rmMicroText);
   SubItem.OnClick := @OnMenuRenderModeClick;
   Item.Add(SubItem);
@@ -290,36 +572,36 @@ begin
   Item.Caption := '-';
   FPopupMenu.Items.Add(Item);
 
-  // Submenu Largura
+  // Submenu Width
   Item := TMenuItem.Create(FPopupMenu);
-  Item.Caption := 'Largura do Mini-mapa';
+  Item.Caption := 'Minimap Width';
 
   SubItem := TMenuItem.Create(Item);
-  SubItem.Caption := '80 px (Estreito)';
+  SubItem.Caption := '80 px (Narrow)';
   SubItem.Tag := 80;
   SubItem.OnClick := @OnMenuWidthClick;
   Item.Add(SubItem);
 
   SubItem := TMenuItem.Create(Item);
-  SubItem.Caption := '110 px (Padrão)';
+  SubItem.Caption := '110 px (Default)';
   SubItem.Tag := 110;
   SubItem.OnClick := @OnMenuWidthClick;
   Item.Add(SubItem);
 
   SubItem := TMenuItem.Create(Item);
-  SubItem.Caption := '140 px (Médio)';
+  SubItem.Caption := '140 px (Medium)';
   SubItem.Tag := 140;
   SubItem.OnClick := @OnMenuWidthClick;
   Item.Add(SubItem);
 
   SubItem := TMenuItem.Create(Item);
-  SubItem.Caption := '180 px (Largo)';
+  SubItem.Caption := '180 px (Wide)';
   SubItem.Tag := 180;
   SubItem.OnClick := @OnMenuWidthClick;
   Item.Add(SubItem);
 
   SubItem := TMenuItem.Create(Item);
-  SubItem.Caption := '220 px (Extra Largo)';
+  SubItem.Caption := '220 px (Extra Wide)';
   SubItem.Tag := 220;
   SubItem.OnClick := @OnMenuWidthClick;
   Item.Add(SubItem);
@@ -331,7 +613,7 @@ begin
   FPopupMenu.Items.Add(Item);
 
   Item := TMenuItem.Create(FPopupMenu);
-  Item.Caption := 'Ocultar Mini-mapa de Código';
+  Item.Caption := 'Hide Code Minimap';
   Item.OnClick := @OnMenuToggleVisible;
   FPopupMenu.Items.Add(Item);
 
@@ -387,12 +669,16 @@ begin
     Width := TMenuItem(Sender).Tag;
     UpdatePopupMenuChecks;
     Invalidate;
+    SaveSettings;
   end;
 end;
 
 procedure TCodeEditorMiniMapControl.OnMenuToggleVisible(Sender: TObject);
 begin
-  Visible := False;
+  if CodeMiniMapGlobal <> nil then
+    CodeMiniMapGlobal.MiniMapEnabled := False
+  else
+    Visible := False;
 end;
 
 procedure TCodeEditorMiniMapControl.SetSynEdit(AValue: TCustomSynEdit);
@@ -400,6 +686,7 @@ begin
   if FSynEdit <> AValue then
   begin
     FSynEdit := AValue;
+    UpdateColorsFromEditor;
     Invalidate;
   end;
 end;
@@ -414,17 +701,18 @@ begin
     UpdatePopupMenuChecks;
 
     case FZoom of
-      zmFit: ZoomDesc := 'Ajustar Todo o Código (Fit)';
-      zm1x:  ZoomDesc := 'Zoom 1x (Ultra Compacto)';
+      zmFit: ZoomDesc := 'Fit All Code (Fit)';
+      zm1x:  ZoomDesc := 'Zoom 1x (Ultra Compact)';
       zm2x:  ZoomDesc := 'Zoom 2x (Normal)';
-      zm3x:  ZoomDesc := 'Zoom 3x (Ampliado)';
-      zm4x:  ZoomDesc := 'Zoom 4x (Detalhado)';
-      zm6x:  ZoomDesc := 'Zoom 6x (Muito Ampliado)';
-      zm8x:  ZoomDesc := 'Zoom 8x (Super Ampliado)';
+      zm3x:  ZoomDesc := 'Zoom 3x (Enlarged)';
+      zm4x:  ZoomDesc := 'Zoom 4x (Detailed)';
+      zm6x:  ZoomDesc := 'Zoom 6x (Very Large)';
+      zm8x:  ZoomDesc := 'Zoom 8x (Extra Large)';
     end;
-    Hint := Format('Mini-mapa: %s | Botões [-]/[+] no topo ou Ctrl+Roda do Mouse', [ZoomDesc]);
+    Hint := Format('Minimap: %s | [-]/[+] buttons at top or Ctrl+Mouse Wheel', [ZoomDesc]);
 
     Invalidate;
+    SaveSettings;
   end;
 end;
 
@@ -435,6 +723,7 @@ begin
     FRenderMode := AValue;
     UpdatePopupMenuChecks;
     Invalidate;
+    SaveSettings;
   end;
 end;
 
@@ -531,12 +820,12 @@ begin
   Canvas.Pen.Color := FViewportBorderColor;
   Canvas.RoundRect(BtnPlusRect.Left, BtnPlusRect.Top, BtnPlusRect.Right, BtnPlusRect.Bottom, 3, 3);
 
-  // Textos dos botões e indicador central de Zoom
+  // Button texts and central Zoom indicator
   Canvas.Brush.Style := bsClear;
-  Canvas.Font.Name := 'Segoe UI';
+  Canvas.Font.Name := 'default';
   Canvas.Font.Size := 8;
   Canvas.Font.Style := [fsBold];
-  Canvas.Font.Color := TColor($683008);
+  Canvas.Font.Color := FTextColor;
 
   TW := Canvas.TextWidth('-');
   TH := Canvas.TextHeight('-');
@@ -548,12 +837,12 @@ begin
   Canvas.TextOut(BtnPlusRect.Left + ((BtnPlusRect.Right - BtnPlusRect.Left - TW) div 2),
                  BtnPlusRect.Top + ((BtnPlusRect.Bottom - BtnPlusRect.Top - TH) div 2) - 1, '+');
 
-  // Indicador central (ex: "Zoom: 2x")
+  // Central zoom indicator (e.g. "Zoom: 2x")
   Canvas.Font.Size := 7;
   if FHoverBtn = 2 then
-    Canvas.Font.Color := TColor($A83800)
+    Canvas.Font.Color := FKeywordColor
   else
-    Canvas.Font.Color := TColor($583820);
+    Canvas.Font.Color := FTextColor;
   Lbl := GetZoomLabel;
   TW := Canvas.TextWidth(Lbl);
   TH := Canvas.TextHeight(Lbl);
@@ -609,11 +898,12 @@ begin
     BarThickness := 3;
   end;
 
-  // Em zooms altos (6x e 8x) ou quando rmMicroText estiver ativo (>= 3x), renderiza micro-texto legível
+  // At high zoom levels (6x and 8x) or when rmMicroText is active (>= 3x), render micro-text
   UseMicroText := ((FRenderMode = rmMicroText) and (APitch >= 3.0)) or (APitch >= 5.5);
   if UseMicroText then
   begin
-    Canvas.Font.Name := 'Consolas';
+    Canvas.Font.Name := 'monospace';
+    Canvas.Font.Pitch := fpFixed;
     if APitch >= 7.5 then
       Canvas.Font.Size := 6
     else if APitch >= 5.5 then
@@ -753,18 +1043,27 @@ var
   VRect: TRect;
   LineStr: string;
 begin
-  // 1. Fundo principal azul bem clarinho
+  // Check if editor color scheme has changed
+  if FSynEdit <> nil then
+  begin
+    if (FSynEdit.Color <> FLastSynEditColor) or
+       (FSynEdit.Font.Color <> FLastSynEditFontColor) or
+       (FSynEdit.Highlighter <> FLastHighlighter) then
+      UpdateColorsFromEditor;
+  end;
+
+  // 1. Main background from current Lazarus color scheme
   Canvas.Brush.Style := bsSolid;
   Canvas.Brush.Color := FBackColor;
   Canvas.FillRect(ClientRect);
 
-  // Linha divisória esquerda
+  // Left divider line
   Canvas.Pen.Style := psSolid;
   Canvas.Pen.Color := FBorderColor;
   Canvas.Pen.Width := 1;
   Canvas.Line(0, 0, 0, ClientHeight);
 
-  // Desenha a barra de controles de Zoom no topo ([-], Zoom, [+])
+  // Top zoom control bar ([-], Zoom, [+])
   DrawHeaderBar;
 
   if (FSynEdit = nil) or (FSynEdit.Lines = nil) then Exit;
@@ -781,44 +1080,30 @@ begin
   Pitch := GetPitchForZoom(FZoom, AvailH, TotalLines);
 
   // 2. Calcula posição da Viewport e intervalo de linhas visíveis
-  if FZoom = zmFit then
+  TotalContentH := Round(TotalLines * Pitch);
+
+  if (FZoom = zmFit) or (TotalContentH <= AvailH) then
   begin
     ScrollOffsetY := 0;
     FirstLine := 1;
     LastLine := TotalLines;
-
-    FVTop := HEADER_HEIGHT + Round((TopLine - 1) * Pitch);
-    FVHeight := Max(14, Round(LinesInWindow * Pitch));
-    FVHeight := Min(ClientHeight - FVTop, FVHeight);
   end
   else
   begin
-    TotalContentH := Round(TotalLines * Pitch);
+    MaxScroll := TotalContentH - AvailH;
+    Progress := (TopLine - 1) / Max(1, MaxTopLine - 1);
+    Progress := Max(0.0, Min(1.0, Progress));
 
-    if TotalContentH <= AvailH then
-    begin
-      ScrollOffsetY := 0;
-      FirstLine := 1;
-      LastLine := TotalLines;
-      FVTop := HEADER_HEIGHT + Round((TopLine - 1) * Pitch);
-      FVHeight := Max(16, Round(LinesInWindow * Pitch));
-      FVHeight := Min(ClientHeight - FVTop, FVHeight);
-    end
-    else
-    begin
-      MaxScroll := TotalContentH - AvailH;
-      Progress := (TopLine - 1) / Max(1, MaxTopLine - 1);
-      Progress := Max(0.0, Min(1.0, Progress));
-
-      ScrollOffsetY := Round(Progress * MaxScroll);
-      FirstLine := Max(1, Round(ScrollOffsetY / Pitch) + 1);
-      LastLine := Min(TotalLines, FirstLine + Round(AvailH / Pitch) + 2);
-
-      FVHeight := Max(20, Round(AvailH * (LinesInWindow / TotalLines)));
-      FVHeight := Min(AvailH, FVHeight);
-      FVTop := HEADER_HEIGHT + Round(Progress * (AvailH - FVHeight));
-    end;
+    ScrollOffsetY := Round(Progress * MaxScroll);
+    FirstLine := Max(1, Round(ScrollOffsetY / Pitch) + 1);
+    LastLine := Min(TotalLines, FirstLine + Round(AvailH / Pitch) + 2);
   end;
+
+  // Viewport height covers the exact number of lines currently displayed in the editor
+  FVHeight := Max(3, Round(LinesInWindow * Pitch));
+  FVHeight := Min(AvailH, FVHeight);
+  FVTop := HEADER_HEIGHT + Round((TopLine - 1) * Pitch) - ScrollOffsetY;
+  FVTop := Max(HEADER_HEIGHT, Min(ClientHeight - FVHeight, FVTop));
 
   // 3. PRIMEIRO desenha o preenchimento azul claro da Viewport (ao fundo),
   //    para que o bloco de código fique 100% visível por cima (efeito transparente)!
@@ -860,9 +1145,9 @@ end;
 
 procedure TCodeEditorMiniMapControl.ScrollToY(AY: Integer);
 var
-  AvailH, RelY, TotalLines, LinesInWindow, MaxTopLine: Integer;
+  AvailH, TotalLines, LinesInWindow, MaxTopLine: Integer;
   Pitch: Double;
-  TotalContentH, VHeight: Integer;
+  TotalContentH, VHeight, TargetTopY: Integer;
   Progress: Double;
   TargetTopLine: Integer;
 begin
@@ -872,35 +1157,24 @@ begin
   if TotalLines <= 0 then Exit;
 
   AvailH := Max(10, ClientHeight - HEADER_HEIGHT);
-  RelY := Max(0, AY - HEADER_HEIGHT);
   LinesInWindow := Max(1, FSynEdit.LinesInWindow);
   MaxTopLine := Max(1, TotalLines - LinesInWindow + 1);
   Pitch := GetPitchForZoom(FZoom, AvailH, TotalLines);
+  VHeight := Max(3, Round(LinesInWindow * Pitch));
+  VHeight := Min(AvailH, VHeight);
 
-  if FZoom = zmFit then
+  TargetTopY := Max(0, AY - HEADER_HEIGHT - FDragOffsetY);
+
+  TotalContentH := Round(TotalLines * Pitch);
+  if TotalContentH <= AvailH then
   begin
-    VHeight := Max(14, Round(LinesInWindow * Pitch));
-    VHeight := Min(AvailH, VHeight);
-    Progress := (RelY - (VHeight div 2)) / Max(1, AvailH - VHeight);
-    Progress := Max(0.0, Min(1.0, Progress));
-    TargetTopLine := 1 + Round(Progress * (MaxTopLine - 1));
+    TargetTopLine := 1 + Round(TargetTopY / Pitch);
   end
   else
   begin
-    TotalContentH := Round(TotalLines * Pitch);
-
-    if TotalContentH <= AvailH then
-    begin
-      TargetTopLine := 1 + Round(RelY / Pitch) - (LinesInWindow div 2);
-    end
-    else
-    begin
-      VHeight := Max(20, Round(AvailH * (LinesInWindow / TotalLines)));
-      VHeight := Min(AvailH, VHeight);
-      Progress := (RelY - (VHeight div 2)) / Max(1, AvailH - VHeight);
-      Progress := Max(0.0, Min(1.0, Progress));
-      TargetTopLine := 1 + Round(Progress * (MaxTopLine - 1));
-    end;
+    Progress := TargetTopY / Max(1, AvailH - VHeight);
+    Progress := Max(0.0, Min(1.0, Progress));
+    TargetTopLine := 1 + Round(Progress * (MaxTopLine - 1));
   end;
 
   TargetTopLine := Max(1, Min(MaxTopLine, TargetTopLine));
@@ -933,6 +1207,11 @@ begin
       end;
       Exit;
     end;
+
+    if (Y >= FVTop) and (Y <= FVTop + FVHeight) then
+      FDragOffsetY := Y - FVTop
+    else
+      FDragOffsetY := FVHeight div 2;
 
     FDragging := True;
     MouseCapture := True;
@@ -983,6 +1262,7 @@ begin
   if FDragging then
   begin
     FDragging := False;
+    FDragOffsetY := 0;
     MouseCapture := False;
     Invalidate;
   end;
@@ -1035,9 +1315,11 @@ constructor TCodeEditorMiniMapManager.Create(AOwner: TComponent);
 begin
   inherited Create(AOwner);
 
+  FEnabled := True;
   FMiniMap := TCodeEditorMiniMapControl.Create(Self);
-  FMiniMap.Width := 110;
-  FMiniMap.Visible := False;
+  LoadSettings;
+  if not FEnabled then
+    FMiniMap.Visible := False;
 
   if SourceEditorManagerIntf <> nil then
   begin
@@ -1045,10 +1327,11 @@ begin
     SourceEditorManagerIntf.RegisterChangeEvent(semEditorStatus, @OnEditorChange);
     SourceEditorManagerIntf.RegisterChangeEvent(semEditorDestroy, @OnEditorChange);
     SourceEditorManagerIntf.RegisterChangeEvent(semWindowActivate, @OnEditorChange);
+    SourceEditorManagerIntf.RegisterChangeEvent(semEditorOptsChanged, @OnEditorChange);
   end;
 
   FTimer := TTimer.Create(Self);
-  FTimer.Interval := 60; // 16 FPS para sincronização suave
+  FTimer.Interval := 60; // 16 FPS for smooth synchronization
   FTimer.OnTimer := @OnTimer;
   FTimer.Enabled := True;
 end;
@@ -1063,6 +1346,7 @@ begin
     SourceEditorManagerIntf.UnRegisterChangeEvent(semEditorStatus, @OnEditorChange);
     SourceEditorManagerIntf.UnRegisterChangeEvent(semEditorDestroy, @OnEditorChange);
     SourceEditorManagerIntf.UnRegisterChangeEvent(semWindowActivate, @OnEditorChange);
+    SourceEditorManagerIntf.UnRegisterChangeEvent(semEditorOptsChanged, @OnEditorChange);
   end;
 
   UnhookSynEdit;
@@ -1118,6 +1402,64 @@ begin
   UpdateActiveEditor;
 end;
 
+procedure TCodeEditorMiniMapManager.LoadSettings;
+var
+  Cfg: TXMLConfig;
+  FileName: string;
+begin
+  try
+    FileName := GetMiniMapConfigFile;
+    if not FileExists(FileName) then Exit;
+    Cfg := TXMLConfig.Create(FileName);
+    try
+      FEnabled := Cfg.GetValue('CodeMiniMap/Enabled/Value', True);
+    finally
+      Cfg.Free;
+    end;
+  except
+  end;
+end;
+
+procedure TCodeEditorMiniMapManager.SaveSettings;
+var
+  Cfg: TXMLConfig;
+  FileName: string;
+begin
+  try
+    FileName := GetMiniMapConfigFile;
+    ForceDirectories(ExtractFilePath(FileName));
+    Cfg := TXMLConfig.Create(FileName);
+    try
+      Cfg.SetValue('CodeMiniMap/Enabled/Value', FEnabled);
+      Cfg.Flush;
+    finally
+      Cfg.Free;
+    end;
+  except
+  end;
+end;
+
+procedure TCodeEditorMiniMapManager.SetMiniMapEnabled(AValue: Boolean);
+begin
+  if FEnabled <> AValue then
+  begin
+    FEnabled := AValue;
+    SaveSettings;
+    if not FEnabled then
+    begin
+      if (FMiniMap <> nil) and FMiniMap.Visible then
+        FMiniMap.Visible := False;
+    end
+    else
+      UpdateActiveEditor;
+  end;
+end;
+
+procedure TCodeEditorMiniMapManager.ToggleMiniMap(Sender: TObject);
+begin
+  MiniMapEnabled := not MiniMapEnabled;
+end;
+
 procedure TCodeEditorMiniMapManager.UpdateActiveEditor;
 var
   CurEditor: TSourceEditorInterface;
@@ -1126,6 +1468,12 @@ var
   P: TWinControl;
 begin
   if FUpdating then Exit;
+  if not FEnabled then
+  begin
+    if (FMiniMap <> nil) and FMiniMap.Visible then
+      FMiniMap.Visible := False;
+    Exit;
+  end;
   FUpdating := True;
   try
     if SourceEditorManagerIntf = nil then
@@ -1195,6 +1543,8 @@ procedure Register;
 begin
   if CodeMiniMapGlobal = nil then
     CodeMiniMapGlobal := TCodeEditorMiniMapManager.Create(nil);
+
+  RegisterIDEMenuCommand(itmViewMainWindows, 'ViewCodeMiniMap', 'Code Minimap', @CodeMiniMapGlobal.ToggleMiniMap);
 end;
 
 initialization

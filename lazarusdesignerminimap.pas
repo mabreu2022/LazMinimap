@@ -1,4 +1,4 @@
-﻿unit LazarusDesignerMiniMap;
+unit LazarusDesignerMiniMap;
 
 {$mode objfpc}{$H+}
 {$warn 5024 off : no warning about unused parameters}
@@ -7,7 +7,8 @@ interface
 
 uses
   Classes, SysUtils, Types, Math, Controls, Graphics, Forms, ExtCtrls, StdCtrls,
-  ComCtrls, Menus, LCLType, LCLIntf, PropEdits, FormEditingIntf, IDEIntf;
+  ComCtrls, Menus, LCLType, LCLIntf, PropEdits, FormEditingIntf, IDEIntf,
+  SrcEditorIntf, SynEdit, LazIDEIntf, Laz2_XMLCfg, MenuIntf;
 
 const
   // Resolução de referência Full HD 1080p
@@ -25,7 +26,7 @@ type
     mmcFloating      // Mover livremente
   );
 
-  { TFormDesignerMiniMapControl: Controle nativo de miniatura do formulário no Form Designer }
+  { TFormDesignerMiniMapControl: Native miniature control for Form Designer }
   TFormDesignerMiniMapControl = class(TCustomControl)
   private
     FTargetForm: TCustomForm;
@@ -37,20 +38,25 @@ type
     FHeaderHeight: Integer;
     FMargin: Integer;
     FBackColor: TColor;
+    FTextColor: TColor;
     FHeaderColor: TColor;
     FBorderColor: TColor;
     FScreenColor: TColor;
     FSelectionColor: TColor;
+    FLastSchemeBg: TColor;
+    FLastSchemeFg: TColor;
 
-    // Gestão de cantos, recolhimento e arraste livre
+    // Corner docking, collapsing, and free dragging
     FCorner: TMiniMapCorner;
     FCollapsed: Boolean;
     FNormalHeight: Integer;
+    FFloatingLeft: Integer;
+    FFloatingTop: Integer;
     FDragging: Boolean;
     FDragMouseStart: TPoint;
     FDragCtrlStart: TPoint;
 
-    // Arraste interativo do formulário dentro da tela 1080p
+    // Interactive dragging of form inside 1080p screen
     FDraggingForm: Boolean;
     FFormDragStartMouse: TPoint;
     FFormDragStartLeft: Integer;
@@ -62,8 +68,9 @@ type
     FVirtualFormTop: Integer;
     FVirtualFormValid: Boolean;
 
-    // Menu de contexto
+    // Context menu
     FPopupMenu: TPopupMenu;
+    procedure UpdateColors;
     procedure SetTargetForm(AValue: TCustomForm);
     procedure SetSelectedComponent(AValue: TComponent);
     procedure SetCorner(AValue: TMiniMapCorner);
@@ -83,6 +90,9 @@ type
     procedure OnMenuTopLeftFormClick(Sender: TObject);
     procedure OnMenuSetScreenCenterClick(Sender: TObject);
     procedure OnMenuSetDesignedClick(Sender: TObject);
+    procedure OnMenuToggleVisible(Sender: TObject);
+    procedure LoadSettings;
+    procedure SaveSettings;
   protected
     procedure Paint; override;
     procedure MouseDown(Button: TMouseButton; Shift: TShiftState; X, Y: Integer); override;
@@ -97,7 +107,11 @@ type
     property SelectedComponent: TComponent read FSelectedComponent write SetSelectedComponent;
     property Corner: TMiniMapCorner read FCorner write SetCorner;
     property Collapsed: Boolean read FCollapsed write SetCollapsed;
+    property FloatingLeft: Integer read FFloatingLeft write FFloatingLeft;
+    property FloatingTop: Integer read FFloatingTop write FFloatingTop;
     property DraggingForm: Boolean read FDraggingForm;
+    property BackColor: TColor read FBackColor;
+    property TextColor: TColor read FTextColor;
   end;
 
   { TFormDesignerMiniMapManager: Gerencia posicionamento e visibilidade sem criar janelas popup }
@@ -107,6 +121,10 @@ type
     FTimer: TTimer;
     FLastSignature: Int64;
     FUpdating: Boolean;
+    FEnabled: Boolean;
+    procedure SetMiniMapEnabled(AValue: Boolean);
+    procedure LoadSettings;
+    procedure SaveSettings;
     function ComputeSignature(AForm: TCustomForm): Int64;
     function IsFormDesignerActiveAndVisible(AForm: TCustomForm; out ADesignArea: TWinControl): Boolean;
     function FindActiveDesignedForm(out ADesignArea: TWinControl): TCustomForm;
@@ -117,7 +135,9 @@ type
   public
     constructor Create(AOwner: TComponent); override;
     destructor Destroy; override;
+    procedure ToggleMiniMap(Sender: TObject);
     property MiniMap: TFormDesignerMiniMapControl read FMiniMap;
+    property MiniMapEnabled: Boolean read FEnabled write SetMiniMapEnabled;
   end;
 
 procedure Register;
@@ -127,7 +147,123 @@ implementation
 var
   DesignerMiniMapGlobal: TFormDesignerMiniMapManager = nil;
 
+function GetMiniMapConfigFile: string;
+var
+  Dir: string;
+begin
+  if LazarusIDE <> nil then
+    Dir := LazarusIDE.GetPrimaryConfigPath
+  else
+    Dir := GetAppConfigDir(False);
+  if Dir = '' then
+    Dir := '.';
+  Result := IncludeTrailingPathDelimiter(Dir) + 'lazminimap.xml';
+end;
+
+function ResolveColor(AColor, ADefault: TColor): TColor;
+begin
+  if (AColor = clNone) or (AColor = clDefault) then
+    Result := ColorToRGB(ADefault)
+  else
+    Result := ColorToRGB(AColor);
+end;
+
+function IsDarkColor(AColor: TColor): Boolean;
+var
+  C: LongWord;
+  R, G, B: Integer;
+begin
+  C := ColorToRGB(AColor);
+  R := C and $FF;
+  G := (C shr 8) and $FF;
+  B := (C shr 16) and $FF;
+  Result := ((R * 77 + G * 150 + B * 29) shr 8) < 128;
+end;
+
+function BlendColors(Col1, Col2: TColor; Factor: Double): TColor;
+var
+  C1, C2: LongWord;
+  R1, G1, B1, R2, G2, B2: Integer;
+  R, G, B: Integer;
+begin
+  C1 := ColorToRGB(Col1);
+  C2 := ColorToRGB(Col2);
+  Factor := Max(0.0, Min(1.0, Factor));
+  R1 := C1 and $FF;
+  G1 := (C1 shr 8) and $FF;
+  B1 := (C1 shr 16) and $FF;
+  R2 := C2 and $FF;
+  G2 := (C2 shr 8) and $FF;
+  B2 := (C2 shr 16) and $FF;
+  R := Round(R1 * (1.0 - Factor) + R2 * Factor);
+  G := Round(G1 * (1.0 - Factor) + G2 * Factor);
+  B := Round(B1 * (1.0 - Factor) + B2 * Factor);
+  Result := RGB(Byte(R), Byte(G), Byte(B));
+end;
+
 { TFormDesignerMiniMapControl }
+
+procedure TFormDesignerMiniMapControl.UpdateColors;
+var
+  CurEditor: TSourceEditorInterface;
+  SynEdit: TCustomSynEdit;
+  SchemeBg, SchemeFg: TColor;
+  IsDark: Boolean;
+begin
+  SchemeBg := clNone;
+  SchemeFg := clNone;
+
+  if (SourceEditorManagerIntf <> nil) and (SourceEditorManagerIntf.ActiveEditor <> nil) then
+  begin
+    CurEditor := SourceEditorManagerIntf.ActiveEditor;
+    if (CurEditor.EditorControl <> nil) and (CurEditor.EditorControl is TCustomSynEdit) then
+    begin
+      SynEdit := TCustomSynEdit(CurEditor.EditorControl);
+      SchemeBg := ResolveColor(SynEdit.Color, clWhite);
+      SchemeFg := ResolveColor(SynEdit.Font.Color, clBlack);
+    end;
+  end;
+
+  if SchemeBg = clNone then
+  begin
+    SchemeBg := ResolveColor(clWindow, clWhite);
+    SchemeFg := ResolveColor(clWindowText, clBlack);
+  end;
+
+  if (SchemeBg = FLastSchemeBg) and (SchemeFg = FLastSchemeFg) then
+    Exit;
+
+  FLastSchemeBg := SchemeBg;
+  FLastSchemeFg := SchemeFg;
+
+  IsDark := IsDarkColor(SchemeBg);
+  FTextColor := SchemeFg;
+
+  if FTextColor = SchemeBg then
+  begin
+    if IsDark then
+      FTextColor := clWhite
+    else
+      FTextColor := clBlack;
+  end;
+
+  if IsDark then
+  begin
+    FBackColor      := BlendColors(SchemeBg, clWhite, 0.05);
+    FHeaderColor    := BlendColors(SchemeBg, clWhite, 0.12);
+    FBorderColor    := BlendColors(SchemeBg, clWhite, 0.22);
+    FScreenColor    := BlendColors(SchemeBg, clBlack, 0.25);
+    FSelectionColor := TColor($00A2E8);
+  end
+  else
+  begin
+    FBackColor      := BlendColors(SchemeBg, clBlack, 0.03);
+    FHeaderColor    := BlendColors(SchemeBg, clBlack, 0.08);
+    FBorderColor    := BlendColors(SchemeBg, clBlack, 0.20);
+    FScreenColor    := BlendColors(SchemeBg, clBlack, 0.04);
+    FSelectionColor := TColor($D05000);
+  end;
+end;
 
 constructor TFormDesignerMiniMapControl.Create(AOwner: TComponent);
 begin
@@ -138,28 +274,79 @@ begin
   FMargin := 6;
   FHeaderHeight := 20;
 
-  // Canto padrão inicial: Inferior Esquerdo (como no Delphi)
+  // Default corner: Bottom-Left
   FCorner := mmcBottomLeft;
   FCollapsed := False;
+  FFloatingLeft := -1;
+  FFloatingTop := -1;
 
-  // Cores do tema escuro moderno
-  FBackColor := TColor($FFF4E8); // Azul bem clarinho (#E8F4FF)
-  FHeaderColor := TColor($FFE6CE); // Cabeçalho azul claro (#CEE6FF)
-  FBorderColor := TColor($D8B490); // Borda azul suave (#90B4D8)
-  FScreenColor := TColor($FFF8F0); // Monitor 1080p azul bem clarinho (#F0F8FF)
-  FSelectionColor := TColor($D05000); // Realce azul forte (#0050D0)
+  FLastSchemeBg := clNone;
+  FLastSchemeFg := clNone;
+
+  // Synchronize colors with current Lazarus color scheme
+  UpdateColors;
 
   DoubleBuffered := True;
   Cursor := crDefault;
   ShowHint := True;
 
   BuildPopupMenu;
+  LoadSettings;
+
+  if FCollapsed then
+    Height := FHeaderHeight + 2;
 end;
 
 destructor TFormDesignerMiniMapControl.Destroy;
 begin
   FPopupMenu.Free;
   inherited Destroy;
+end;
+
+procedure TFormDesignerMiniMapControl.LoadSettings;
+var
+  Cfg: TXMLConfig;
+  FileName: string;
+begin
+  try
+    FileName := GetMiniMapConfigFile;
+    if not FileExists(FileName) then Exit;
+    Cfg := TXMLConfig.Create(FileName);
+    try
+      FCorner := TMiniMapCorner(Cfg.GetValue('DesignerMiniMap/Corner/Value', Ord(mmcBottomLeft)));
+      FCollapsed := Cfg.GetValue('DesignerMiniMap/Collapsed/Value', False);
+      FFloatingLeft := Cfg.GetValue('DesignerMiniMap/FloatingLeft/Value', -1);
+      FFloatingTop := Cfg.GetValue('DesignerMiniMap/FloatingTop/Value', -1);
+    finally
+      Cfg.Free;
+    end;
+  except
+  end;
+end;
+
+procedure TFormDesignerMiniMapControl.SaveSettings;
+var
+  Cfg: TXMLConfig;
+  FileName: string;
+begin
+  try
+    FileName := GetMiniMapConfigFile;
+    ForceDirectories(ExtractFilePath(FileName));
+    Cfg := TXMLConfig.Create(FileName);
+    try
+      Cfg.SetValue('DesignerMiniMap/Corner/Value', Ord(FCorner));
+      Cfg.SetValue('DesignerMiniMap/Collapsed/Value', FCollapsed);
+      if (FFloatingLeft >= 0) and (FFloatingTop >= 0) then
+      begin
+        Cfg.SetValue('DesignerMiniMap/FloatingLeft/Value', FFloatingLeft);
+        Cfg.SetValue('DesignerMiniMap/FloatingTop/Value', FFloatingTop);
+      end;
+      Cfg.Flush;
+    finally
+      Cfg.Free;
+    end;
+  except
+  end;
 end;
 
 procedure TFormDesignerMiniMapControl.BuildPopupMenu;
@@ -169,25 +356,25 @@ begin
   FPopupMenu := TPopupMenu.Create(Self);
 
   Item := TMenuItem.Create(FPopupMenu);
-  Item.Caption := 'Ancorar no Canto Inferior Esquerdo (Padrão)';
+  Item.Caption := 'Dock to Bottom-Left (Default)';
   Item.Tag := Ord(mmcBottomLeft);
   Item.OnClick := @OnMenuCornerClick;
   FPopupMenu.Items.Add(Item);
 
   Item := TMenuItem.Create(FPopupMenu);
-  Item.Caption := 'Ancorar no Canto Inferior Direito';
+  Item.Caption := 'Dock to Bottom-Right';
   Item.Tag := Ord(mmcBottomRight);
   Item.OnClick := @OnMenuCornerClick;
   FPopupMenu.Items.Add(Item);
 
   Item := TMenuItem.Create(FPopupMenu);
-  Item.Caption := 'Ancorar no Canto Superior Esquerdo';
+  Item.Caption := 'Dock to Top-Left';
   Item.Tag := Ord(mmcTopLeft);
   Item.OnClick := @OnMenuCornerClick;
   FPopupMenu.Items.Add(Item);
 
   Item := TMenuItem.Create(FPopupMenu);
-  Item.Caption := 'Ancorar no Canto Superior Direito';
+  Item.Caption := 'Dock to Top-Right';
   Item.Tag := Ord(mmcTopRight);
   Item.OnClick := @OnMenuCornerClick;
   FPopupMenu.Items.Add(Item);
@@ -197,13 +384,13 @@ begin
   FPopupMenu.Items.Add(Item);
 
   Item := TMenuItem.Create(FPopupMenu);
-  Item.Caption := 'Mover Livremente (Destacar Mini-mapa)';
+  Item.Caption := 'Float Freely (Undock Minimap)';
   Item.Tag := Ord(mmcFloating);
   Item.OnClick := @OnMenuCornerClick;
   FPopupMenu.Items.Add(Item);
 
   Item := TMenuItem.Create(FPopupMenu);
-  Item.Caption := 'Recolher / Expandir Mini-mapa';
+  Item.Caption := 'Collapse / Expand Minimap';
   Item.OnClick := @OnMenuCollapseClick;
   FPopupMenu.Items.Add(Item);
 
@@ -212,26 +399,43 @@ begin
   FPopupMenu.Items.Add(Item);
 
   Item := TMenuItem.Create(FPopupMenu);
-  Item.Caption := 'Posicionar Formulário no Centro da Tela';
+  Item.Caption := 'Position Form in Center of Screen';
   Item.OnClick := @OnMenuCenterFormClick;
   FPopupMenu.Items.Add(Item);
 
   Item := TMenuItem.Create(FPopupMenu);
-  Item.Caption := 'Posicionar no Canto Superior Esquerdo (0, 0)';
+  Item.Caption := 'Position at Top-Left (0, 0)';
   Item.OnClick := @OnMenuTopLeftFormClick;
   FPopupMenu.Items.Add(Item);
 
   Item := TMenuItem.Create(FPopupMenu);
-  Item.Caption := 'Modo de Execução: poScreenCenter (Centralizar ao Rodar)';
+  Item.Caption := 'Startup Position: poScreenCenter (Center on Run)';
   Item.OnClick := @OnMenuSetScreenCenterClick;
   FPopupMenu.Items.Add(Item);
 
   Item := TMenuItem.Create(FPopupMenu);
-  Item.Caption := 'Modo de Execução: poDesigned (Usar Coordenadas do Mini-mapa)';
+  Item.Caption := 'Startup Position: poDesigned (Use Minimap Coordinates)';
   Item.OnClick := @OnMenuSetDesignedClick;
   FPopupMenu.Items.Add(Item);
 
+  Item := TMenuItem.Create(FPopupMenu);
+  Item.Caption := '-';
+  FPopupMenu.Items.Add(Item);
+
+  Item := TMenuItem.Create(FPopupMenu);
+  Item.Caption := 'Hide Designer Minimap';
+  Item.OnClick := @OnMenuToggleVisible;
+  FPopupMenu.Items.Add(Item);
+
   PopupMenu := FPopupMenu;
+end;
+
+procedure TFormDesignerMiniMapControl.OnMenuToggleVisible(Sender: TObject);
+begin
+  if DesignerMiniMapGlobal <> nil then
+    DesignerMiniMapGlobal.MiniMapEnabled := False
+  else
+    Visible := False;
 end;
 
 procedure TFormDesignerMiniMapControl.OnMenuCornerClick(Sender: TObject);
@@ -372,6 +576,7 @@ begin
     FCorner := AValue;
     UpdateDockPosition;
     Invalidate;
+    SaveSettings;
   end;
 end;
 
@@ -386,6 +591,7 @@ begin
       Height := FNormalHeight;
     UpdateDockPosition;
     Invalidate;
+    SaveSettings;
   end;
 end;
 
@@ -433,6 +639,15 @@ begin
 
     mmcFloating:
     begin
+      if (FFloatingLeft >= 0) and (FFloatingTop >= 0) then
+      begin
+        NewL := Min(FFloatingLeft, ParentW - Width);
+        NewT := Min(FFloatingTop, ParentH - Height);
+        NewL := Max(0, NewL);
+        NewT := Max(0, NewT);
+        if (Left <> NewL) or (Top <> NewT) then
+          SetBounds(NewL, NewT, Width, Height);
+      end;
       Anchors := [akLeft, akTop];
       Exit;
     end;
@@ -536,45 +751,91 @@ begin
   Canvas.Pen.Style := psSolid;
   Canvas.Pen.Width := 1;
 
-  if (ACtrl is TCustomPanel) or (Pos('Panel', ClassNm) > 0) or (Pos('GroupBox', ClassNm) > 0) then
+  if IsDarkColor(FBackColor) then
   begin
-    Canvas.Brush.Style := bsSolid;
-    Canvas.Brush.Color := TColor($FFF2E4);
-    Canvas.Pen.Color := TColor($C89868);
-    Canvas.Rectangle(CRect);
-  end
-  else if (ACtrl is TCustomButton) or (Pos('Button', ClassNm) > 0) then
-  begin
-    Canvas.Brush.Style := bsSolid;
-    Canvas.Brush.Color := TColor($F8D8B8);
-    Canvas.Pen.Color := TColor($B07840);
-    Canvas.RoundRect(CRect.Left, CRect.Top, CRect.Right, CRect.Bottom, 2, 2);
-  end
-  else if (ACtrl is TCustomEdit) or (Pos('Edit', ClassNm) > 0) or (Pos('Memo', ClassNm) > 0) then
-  begin
-    Canvas.Brush.Style := bsSolid;
-    Canvas.Brush.Color := TColor($FFFFFF);
-    Canvas.Pen.Color := TColor($B89068);
-    Canvas.Rectangle(CRect);
-  end
-  else if (ACtrl is TCustomLabel) or (Pos('Label', ClassNm) > 0) then
-  begin
-    Canvas.Pen.Color := TColor($704820);
-    Canvas.Line(CRect.Left, CRect.Top + (MH div 2), Min(CRect.Right, CRect.Left + Max(3, MW - 1)), CRect.Top + (MH div 2));
-  end
-  else if (Pos('Grid', ClassNm) > 0) or (Pos('List', ClassNm) > 0) or (Pos('Tree', ClassNm) > 0) then
-  begin
-    Canvas.Brush.Style := bsSolid;
-    Canvas.Brush.Color := TColor($FFFDF9);
-    Canvas.Pen.Color := TColor($C09870);
-    Canvas.Rectangle(CRect);
+    if (ACtrl is TCustomPanel) or (Pos('Panel', ClassNm) > 0) or (Pos('GroupBox', ClassNm) > 0) then
+    begin
+      Canvas.Brush.Style := bsSolid;
+      Canvas.Brush.Color := TColor($2A2B30);
+      Canvas.Pen.Color := TColor($42444C);
+      Canvas.Rectangle(CRect);
+    end
+    else if (ACtrl is TCustomButton) or (Pos('Button', ClassNm) > 0) then
+    begin
+      Canvas.Brush.Style := bsSolid;
+      Canvas.Brush.Color := TColor($3A4452);
+      Canvas.Pen.Color := TColor($58657A);
+      Canvas.RoundRect(CRect.Left, CRect.Top, CRect.Right, CRect.Bottom, 2, 2);
+    end
+    else if (ACtrl is TCustomEdit) or (Pos('Edit', ClassNm) > 0) or (Pos('Memo', ClassNm) > 0) then
+    begin
+      Canvas.Brush.Style := bsSolid;
+      Canvas.Brush.Color := TColor($18191B);
+      Canvas.Pen.Color := TColor($484B52);
+      Canvas.Rectangle(CRect);
+    end
+    else if (ACtrl is TCustomLabel) or (Pos('Label', ClassNm) > 0) then
+    begin
+      Canvas.Pen.Color := TColor($9AA0A6);
+      Canvas.Line(CRect.Left, CRect.Top + (MH div 2), Min(CRect.Right, CRect.Left + Max(3, MW - 1)), CRect.Top + (MH div 2));
+    end
+    else if (Pos('Grid', ClassNm) > 0) or (Pos('List', ClassNm) > 0) or (Pos('Tree', ClassNm) > 0) then
+    begin
+      Canvas.Brush.Style := bsSolid;
+      Canvas.Brush.Color := TColor($202226);
+      Canvas.Pen.Color := TColor($3D414A);
+      Canvas.Rectangle(CRect);
+    end
+    else
+    begin
+      Canvas.Brush.Style := bsSolid;
+      Canvas.Brush.Color := TColor($25282E);
+      Canvas.Pen.Color := TColor($444852);
+      Canvas.Rectangle(CRect);
+    end;
   end
   else
   begin
-    Canvas.Brush.Style := bsSolid;
-    Canvas.Brush.Color := TColor($FCEADB);
-    Canvas.Pen.Color := TColor($B88858);
-    Canvas.Rectangle(CRect);
+    if (ACtrl is TCustomPanel) or (Pos('Panel', ClassNm) > 0) or (Pos('GroupBox', ClassNm) > 0) then
+    begin
+      Canvas.Brush.Style := bsSolid;
+      Canvas.Brush.Color := TColor($FFF2E4);
+      Canvas.Pen.Color := TColor($C89868);
+      Canvas.Rectangle(CRect);
+    end
+    else if (ACtrl is TCustomButton) or (Pos('Button', ClassNm) > 0) then
+    begin
+      Canvas.Brush.Style := bsSolid;
+      Canvas.Brush.Color := TColor($F8D8B8);
+      Canvas.Pen.Color := TColor($B07840);
+      Canvas.RoundRect(CRect.Left, CRect.Top, CRect.Right, CRect.Bottom, 2, 2);
+    end
+    else if (ACtrl is TCustomEdit) or (Pos('Edit', ClassNm) > 0) or (Pos('Memo', ClassNm) > 0) then
+    begin
+      Canvas.Brush.Style := bsSolid;
+      Canvas.Brush.Color := TColor($FFFFFF);
+      Canvas.Pen.Color := TColor($B89068);
+      Canvas.Rectangle(CRect);
+    end
+    else if (ACtrl is TCustomLabel) or (Pos('Label', ClassNm) > 0) then
+    begin
+      Canvas.Pen.Color := TColor($704820);
+      Canvas.Line(CRect.Left, CRect.Top + (MH div 2), Min(CRect.Right, CRect.Left + Max(3, MW - 1)), CRect.Top + (MH div 2));
+    end
+    else if (Pos('Grid', ClassNm) > 0) or (Pos('List', ClassNm) > 0) or (Pos('Tree', ClassNm) > 0) then
+    begin
+      Canvas.Brush.Style := bsSolid;
+      Canvas.Brush.Color := TColor($FFFDF9);
+      Canvas.Pen.Color := TColor($C09870);
+      Canvas.Rectangle(CRect);
+    end
+    else
+    begin
+      Canvas.Brush.Style := bsSolid;
+      Canvas.Brush.Color := TColor($FCEADB);
+      Canvas.Pen.Color := TColor($B88858);
+      Canvas.Rectangle(CRect);
+    end;
   end;
 
   if IsSel then
@@ -646,20 +907,22 @@ var
   HeaderStr, ResStr, CornerTag: string;
   CenterX, CenterY: Integer;
 begin
-  // Fundo externo da janela do Mini-mapa
+  UpdateColors;
+
+  // Outer background of the Minimap window
   Canvas.Brush.Style := bsSolid;
   Canvas.Brush.Color := FBackColor;
   Canvas.Pen.Color := FBorderColor;
   Canvas.Pen.Width := 1;
   Canvas.RoundRect(0, 0, ClientWidth, ClientHeight, 4, 4);
 
-  // Barra de cabeçalho
+  // Header bar
   Canvas.Brush.Color := FHeaderColor;
   Canvas.FillRect(Rect(1, 1, ClientWidth - 1, FHeaderHeight));
   Canvas.Pen.Color := FBorderColor;
   Canvas.Line(1, FHeaderHeight, ClientWidth - 1, FHeaderHeight);
 
-  // Tag do canto atual
+  // Current corner tag
   case FCorner of
     mmcBottomLeft:  CornerTag := '[↙]';
     mmcBottomRight: CornerTag := '[↘]';
@@ -668,83 +931,96 @@ begin
     mmcFloating:    CornerTag := '[⚓]';
   end;
 
-  // Botão de recolher/expandir no canto direito da barra de título
+  // Collapse / expand button on right side of title bar
   Canvas.Font.Size := 7;
-  Canvas.Font.Color := TColor($683818);
+  Canvas.Font.Color := FTextColor;
   Canvas.Brush.Style := bsClear;
   if FCollapsed then
     Canvas.TextOut(ClientWidth - 16, 3, '+')
   else
     Canvas.TextOut(ClientWidth - 16, 3, '-');
 
-  // Ícone de ancoragem
+  // Docking icon
   Canvas.TextOut(ClientWidth - 36, 3, CornerTag);
 
-  // Título e dimensões do formulário
+  // Form title and dimensions
   if FDraggingForm and (FTargetForm <> nil) then
   begin
     if FSnappedCenterH and FSnappedCenterV then
-      HeaderStr := Format('%s: [Centro 1080p]', [FTargetForm.Name])
+      HeaderStr := Format('%s: [Center 1080p]', [FTargetForm.Name])
     else
       HeaderStr := Format('%s: X=%d, Y=%d', [FTargetForm.Name, FVirtualFormLeft, FVirtualFormTop]);
   end
   else if FTargetForm <> nil then
   begin
     if FTargetForm.Position in [poScreenCenter, poDesktopCenter] then
-      HeaderStr := Format('%s [%dx%d] (Centro)', [FTargetForm.Name, FTargetForm.Width, FTargetForm.Height])
+      HeaderStr := Format('%s [%dx%d] (Center)', [FTargetForm.Name, FTargetForm.Width, FTargetForm.Height])
     else
       HeaderStr := Format('%s [%dx%d] (%d,%d)', [FTargetForm.Name, FTargetForm.Width, FTargetForm.Height, FVirtualFormLeft, FVirtualFormTop]);
   end
   else
     HeaderStr := 'Form Designer (1080p)';
 
+  Canvas.Font.Color := FTextColor;
   Canvas.TextOut(6, 4, HeaderStr);
 
-  // Se estiver recolhido, não desenha o corpo
+  // If collapsed, do not draw body
   if FCollapsed then Exit;
 
   CalculateMetrics;
 
-  // 1. Desenha a Tela de 1080p (Monitor Full HD)
+  // 1. Draw 1080p Screen (Full HD Monitor)
   Canvas.Brush.Style := bsSolid;
   Canvas.Brush.Color := FScreenColor;
-  Canvas.Pen.Color := TColor($D8B898);
+  if IsDarkColor(FBackColor) then
+    Canvas.Pen.Color := BlendColors(FScreenColor, clWhite, 0.20)
+  else
+    Canvas.Pen.Color := TColor($D8B898);
   Canvas.Pen.Width := 1;
   Canvas.Rectangle(FScreenRect);
 
-  // Linhas guia de centro de tela
+  // Center guideline lines
   CenterX := FScreenRect.Left + ((FScreenRect.Right - FScreenRect.Left) div 2);
   CenterY := FScreenRect.Top + ((FScreenRect.Bottom - FScreenRect.Top) div 2);
 
   if FDraggingForm and FSnappedCenterH then
   begin
-    Canvas.Pen.Color := TColor($00D7FF); // Guia de centro vertical destacada
+    Canvas.Pen.Color := TColor($00D7FF); // Highlighted center vertical guide
     Canvas.Line(CenterX, FScreenRect.Top + 1, CenterX, FScreenRect.Bottom - 1);
   end
   else
   begin
-    Canvas.Pen.Color := TColor($F0DEC8);
+    if IsDarkColor(FBackColor) then
+      Canvas.Pen.Color := BlendColors(FScreenColor, clWhite, 0.15)
+    else
+      Canvas.Pen.Color := TColor($F0DEC8);
     Canvas.Line(CenterX, FScreenRect.Top + 1, CenterX, FScreenRect.Bottom - 1);
   end;
 
   if FDraggingForm and FSnappedCenterV then
   begin
-    Canvas.Pen.Color := TColor($00D7FF); // Guia de centro horizontal destacada
+    Canvas.Pen.Color := TColor($00D7FF); // Highlighted center horizontal guide
     Canvas.Line(FScreenRect.Left + 1, CenterY, FScreenRect.Right - 1, CenterY);
   end
   else
   begin
-    Canvas.Pen.Color := TColor($F0DEC8);
+    if IsDarkColor(FBackColor) then
+      Canvas.Pen.Color := BlendColors(FScreenColor, clWhite, 0.15)
+    else
+      Canvas.Pen.Color := TColor($F0DEC8);
     Canvas.Line(FScreenRect.Left + 1, CenterY, FScreenRect.Right - 1, CenterY);
   end;
 
-  // Legenda 1080p
+  // 1080p resolution legend
   Canvas.Font.Size := 6;
-  Canvas.Font.Color := TColor($A07850);
+  if IsDarkColor(FBackColor) then
+    Canvas.Font.Color := BlendColors(FScreenColor, clWhite, 0.40)
+  else
+    Canvas.Font.Color := TColor($A07850);
   ResStr := '1080p';
   Canvas.TextOut(FScreenRect.Right - Canvas.TextWidth(ResStr) - 3, FScreenRect.Bottom - Canvas.TextHeight(ResStr) - 1, ResStr);
 
-  // Se estiver arrastando, mostra coordenadas no canto inferior esquerdo do monitor
+  // If dragging, show coordinates in bottom-left of monitor
   if FDraggingForm and (FTargetForm <> nil) then
   begin
     Canvas.Font.Color := TColor($00D7FF);
@@ -753,37 +1029,56 @@ begin
 
   if FTargetForm = nil then Exit;
 
-  // 2. Desenha o Formulário proporcional na tela de 1080p
+  // 2. Draw proportional Form on 1080p screen
   Canvas.Brush.Style := bsSolid;
-  Canvas.Brush.Color := TColor($FFE8D0);
-  if FDraggingForm then
+  if IsDarkColor(FBackColor) then
   begin
-    Canvas.Pen.Color := TColor($00D7FF); // Realce ciano durante o arraste
-    Canvas.Pen.Width := 2;
+    Canvas.Brush.Color := BlendColors(FScreenColor, clWhite, 0.15);
+    if FDraggingForm then
+    begin
+      Canvas.Pen.Color := TColor($00D7FF);
+      Canvas.Pen.Width := 2;
+    end
+    else
+    begin
+      Canvas.Pen.Color := BlendColors(FScreenColor, clWhite, 0.35);
+      Canvas.Pen.Width := 1;
+    end;
   end
   else
   begin
-    Canvas.Pen.Color := TColor($B88048);
-    Canvas.Pen.Width := 1;
+    Canvas.Brush.Color := TColor($FFE8D0);
+    if FDraggingForm then
+    begin
+      Canvas.Pen.Color := TColor($00D7FF);
+      Canvas.Pen.Width := 2;
+    end
+    else
+    begin
+      Canvas.Pen.Color := TColor($B88048);
+      Canvas.Pen.Width := 1;
+    end;
   end;
   Canvas.Rectangle(FFormRect);
   Canvas.Pen.Width := 1;
 
-  // Barra de título do formulário
+  // Form title bar
   if (FFormRect.Bottom - FFormRect.Top) > 6 then
   begin
     if FDraggingForm then
       Canvas.Brush.Color := TColor($007ACC)
+    else if IsDarkColor(FBackColor) then
+      Canvas.Brush.Color := BlendColors(FScreenColor, clWhite, 0.28)
     else
       Canvas.Brush.Color := TColor($D88838);
     Canvas.FillRect(Rect(FFormRect.Left + 1, FFormRect.Top + 1, FFormRect.Right - 1, FFormRect.Top + 3));
   end;
 
-  // 3. Desenha controles do formulário
+  // 3. Draw controls of the form
   for I := 0 to FTargetForm.ControlCount - 1 do
     DrawControlRecursive(FTargetForm.Controls[I], Point(FFormRect.Left, FFormRect.Top));
 
-  // 4. Desenha componentes não-visuais
+  // 4. Draw non-visual components
   DrawNonVisualComponents(Point(FFormRect.Left, FFormRect.Top));
 end;
 
@@ -1026,7 +1321,7 @@ begin
       if FHoveredComponent <> nil then
         Hint := Format('%s: %s', [FHoveredComponent.Name, FHoveredComponent.ClassName])
       else if PtInRect(FFormRect, Point(X, Y)) then
-        Hint := Format('%s [Left: %d, Top: %d] - Arraste para mover na tela 1080p', [FTargetForm.Name, FVirtualFormLeft, FVirtualFormTop])
+        Hint := Format('%s [Left: %d, Top: %d] - Drag to move on 1080p screen', [FTargetForm.Name, FVirtualFormLeft, FVirtualFormTop])
       else
         Hint := '';
       Invalidate;
@@ -1044,6 +1339,12 @@ begin
   begin
     FDragging := False;
     MouseCapture := False;
+    if FCorner = mmcFloating then
+    begin
+      FFloatingLeft := Left;
+      FFloatingTop := Top;
+      SaveSettings;
+    end;
   end;
 
   if FDraggingForm then
@@ -1091,8 +1392,11 @@ constructor TFormDesignerMiniMapManager.Create(AOwner: TComponent);
 begin
   inherited Create(AOwner);
 
+  FEnabled := True;
   FMiniMap := TFormDesignerMiniMapControl.Create(Self);
-  FMiniMap.Visible := False;
+  LoadSettings;
+  if not FEnabled then
+    FMiniMap.Visible := False;
 
   FLastSignature := -1;
 
@@ -1265,6 +1569,64 @@ begin
   UpdatePositionAndState;
 end;
 
+procedure TFormDesignerMiniMapManager.LoadSettings;
+var
+  Cfg: TXMLConfig;
+  FileName: string;
+begin
+  try
+    FileName := GetMiniMapConfigFile;
+    if not FileExists(FileName) then Exit;
+    Cfg := TXMLConfig.Create(FileName);
+    try
+      FEnabled := Cfg.GetValue('DesignerMiniMap/Enabled/Value', True);
+    finally
+      Cfg.Free;
+    end;
+  except
+  end;
+end;
+
+procedure TFormDesignerMiniMapManager.SaveSettings;
+var
+  Cfg: TXMLConfig;
+  FileName: string;
+begin
+  try
+    FileName := GetMiniMapConfigFile;
+    ForceDirectories(ExtractFilePath(FileName));
+    Cfg := TXMLConfig.Create(FileName);
+    try
+      Cfg.SetValue('DesignerMiniMap/Enabled/Value', FEnabled);
+      Cfg.Flush;
+    finally
+      Cfg.Free;
+    end;
+  except
+  end;
+end;
+
+procedure TFormDesignerMiniMapManager.SetMiniMapEnabled(AValue: Boolean);
+begin
+  if FEnabled <> AValue then
+  begin
+    FEnabled := AValue;
+    SaveSettings;
+    if not FEnabled then
+    begin
+      if (FMiniMap <> nil) and FMiniMap.Visible then
+        FMiniMap.Visible := False;
+    end
+    else
+      UpdatePositionAndState;
+  end;
+end;
+
+procedure TFormDesignerMiniMapManager.ToggleMiniMap(Sender: TObject);
+begin
+  MiniMapEnabled := not MiniMapEnabled;
+end;
+
 procedure TFormDesignerMiniMapManager.UpdatePositionAndState;
 var
   DesignedForm: TCustomForm;
@@ -1272,6 +1634,12 @@ var
   Sig: Int64;
 begin
   if FUpdating then Exit;
+  if not FEnabled then
+  begin
+    if (FMiniMap <> nil) and FMiniMap.Visible then
+      FMiniMap.Visible := False;
+    Exit;
+  end;
   FUpdating := True;
   try
     DesignedForm := FindActiveDesignedForm(DesignArea);
@@ -1319,6 +1687,8 @@ procedure Register;
 begin
   if DesignerMiniMapGlobal = nil then
     DesignerMiniMapGlobal := TFormDesignerMiniMapManager.Create(nil);
+
+  RegisterIDEMenuCommand(itmViewMainWindows, 'ViewDesignerMiniMap', 'Designer Minimap', @DesignerMiniMapGlobal.ToggleMiniMap);
 end;
 
 initialization
